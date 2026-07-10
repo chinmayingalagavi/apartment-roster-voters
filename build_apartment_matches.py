@@ -104,7 +104,6 @@ APARTMENT_CONFIG_REQUIRED_COLUMNS = [
 
 APARTMENT_CONFIG_OPTIONAL_COLUMNS = [
     "extra_filler_terms",
-    "output_path",
 ]
 
 APARTMENT_CONFIG_COLUMNS = [
@@ -145,7 +144,6 @@ class ApartmentConfig:
     key: str
     apartment_name: str
     roster_path: Path
-    output_path: Path
     keywords: tuple[str, ...]
     extra_filler_terms: tuple[str, ...] = ()
 
@@ -214,12 +212,10 @@ def load_apartment_configs(apartments_csv: Path) -> dict[str, ApartmentConfig]:
         if key in configs:
             raise SystemExit(f"{apartments_csv} has duplicate key: {key}")
 
-        default_output_path = PROJECT_ROOT / "outputs" / f"{key}_voters.csv"
         configs[key] = ApartmentConfig(
             key=key,
             apartment_name=apartment_name,
             roster_path=resolve_config_path(roster_path_text, base_dir),
-            output_path=resolve_config_path(row["output_path"], base_dir, default_output_path),
             keywords=keywords,
             extra_filler_terms=extra_filler_terms,
         )
@@ -1314,7 +1310,7 @@ def build_apartment_voter_rows(
 def run_one(config: ApartmentConfig, voter_csv: Path, output_csv: Path | None = None) -> pd.DataFrame:
     voters, roster_rows, roster = load_data(voter_csv, config)
     out = build_apartment_voter_rows(voters, roster_rows, roster, config)
-    destination = output_csv or config.output_path
+    destination = output_csv or default_output_csv(config)
     destination.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(destination, index=False)
     print(f"{config.key}: rows: {len(out)}")
@@ -1330,6 +1326,10 @@ def run_one(config: ApartmentConfig, voter_csv: Path, output_csv: Path | None = 
         )
     print(f"output_csv: {destination}")
     return out
+
+
+def default_output_csv(config: ApartmentConfig) -> Path:
+    return PROJECT_ROOT / "outputs" / f"{config.key}_voters.csv"
 
 
 def household_count(rows: pd.DataFrame) -> int:
@@ -1453,7 +1453,7 @@ def main() -> None:
         output_root.mkdir(parents=True, exist_ok=True)
         summaries: list[dict[str, object]] = []
         for config in configs.values():
-            output_csv = output_root / f"{config.key}_voters.csv" if args.output_dir else config.output_path
+            output_csv = output_root / f"{config.key}_voters.csv"
             out = run_one(config, args.voter_csv, output_csv)
             roster_rows = load_roster(config)
             summaries.append(apartment_run_summary(config, roster_rows, out, output_csv))
@@ -1480,7 +1480,7 @@ def main() -> None:
 
     config = configs[args.apartment]
     out = run_one(config, args.voter_csv, args.output_csv)
-    output_csv = args.output_csv or config.output_path
+    output_csv = args.output_csv or default_output_csv(config)
     roster_rows = load_roster(config)
     log_path = write_run_log(
         PROJECT_ROOT / "outputs",

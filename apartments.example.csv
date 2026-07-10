@@ -1,2 +1,2 @@
-key,apartment_name,roster_path,keywords,extra_filler_terms,output_path
-sample_residency,Sample Residency,standardized_rosters/sample_residency.csv,sample residency;sample;residency;sampel residency,PHASE,outputs/sample_residency_voters.csv
+key,apartment_name,roster_path,keywords,extra_filler_terms
+sample_residency,Sample Residency,standardized_rosters/sample_residency.csv,sample residency;sample;residency;sampel residency,PHASE

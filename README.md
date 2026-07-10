@@ -62,7 +62,7 @@ The apartment list CSV tells the script which apartments to run and where their 
 It should have these columns:
 
 ```text
-key,apartment_name,roster_path,keywords,extra_filler_terms,output_path
+key,apartment_name,roster_path,keywords,extra_filler_terms
 ```
 
 | column | meaning |
@@ -72,13 +72,12 @@ key,apartment_name,roster_path,keywords,extra_filler_terms,output_path
 | `roster_path` | Path to the standardized roster CSV. Relative paths are read relative to the apartment list CSV. |
 | `keywords` | Semicolon-separated words or phrases that identify this apartment in voter addresses. Include the full apartment name, each word in the apartment name, and useful misspellings. |
 | `extra_filler_terms` | Optional semicolon-separated address words to ignore while parsing unit numbers. These terms do not identify the apartment by themselves. |
-| `output_path` | Optional default output file if no output option is given. Relative paths are read relative to the apartment list CSV. Blank means `outputs/{key}_voters.csv`. |
 
 Example row:
 
 ```csv
-key,apartment_name,roster_path,keywords,extra_filler_terms,output_path
-sample_residency,Sample Residency,standardized_rosters/sample_residency.csv,sample residency;sample;residency;sampel residency,PHASE,outputs/sample_residency_voters.csv
+key,apartment_name,roster_path,keywords,extra_filler_terms
+sample_residency,Sample Residency,standardized_rosters/sample_residency.csv,sample residency;sample;residency;sampel residency,PHASE
 ```
 
 Do not put another apartment's name in `keywords` or `extra_filler_terms`.
@@ -201,7 +200,7 @@ With `--output-dir outputs`, output files are named:
 outputs/{apartment_key}_voters.csv
 ```
 
-Without `--output-dir`, each apartment uses `output_path` from `apartments.csv`. If `output_path` is blank, the default is `outputs/{apartment_key}_voters.csv`.
+Without `--output-dir`, output files are also written as `outputs/{apartment_key}_voters.csv`.
 
 Each output row is one voter-list row linked to one apartment unit.
 
