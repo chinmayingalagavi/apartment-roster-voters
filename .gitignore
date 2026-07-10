@@ -1,0 +1,12 @@
+# Local inputs and generated outputs
+apartments.csv
+data/
+standardized_rosters/
+outputs/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+
+# Local OS metadata
+.DS_Store
