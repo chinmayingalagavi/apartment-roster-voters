@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# AUTHOR: Chinmay and AI
 """Build linked voter CSVs for apartments from standardized roster CSVs."""
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ UNIT_PAD_WIDTH = 3
 VOTER_OUTPUT_COLUMNS = [
     "serial_number",
     "epic_number",
-    "name",
+    "voter_name",
     "relation_type",
     "relation_name",
     "house_number",
@@ -45,16 +46,34 @@ APARTMENT_OUTPUT_COLUMNS = [
     "apartment_block",
     "apartment_unit_part",
     "apartment_status",
-    "apartment_names_in_house",
+    "apartment_connection",
+    "part_name_match",
+    "name_match_pct",
     "voter_link_type",
 ]
 
-OUTPUT_COLUMNS = [*VOTER_OUTPUT_COLUMNS, *APARTMENT_OUTPUT_COLUMNS]
+# Rows read as one apartment household per unit: apartment details first, then the
+# link type, then the voter-list name and relation, then the remaining voter columns.
+VOTER_NAME_COLUMNS = ["voter_name", "relation_type", "relation_name"]
+
+OUTPUT_COLUMNS = [
+    *APARTMENT_OUTPUT_COLUMNS,
+    *VOTER_NAME_COLUMNS,
+    *[column for column in VOTER_OUTPUT_COLUMNS if column not in VOTER_NAME_COLUMNS],
+]
+
+# Status for voters whose address names the apartment but maps to no single unit.
+UNMAPPED_STATUS = "Unmapped"
+
+# Which roster person a row is connected through, in order of preference.
+CONNECTION_PRIORITY_VOTER_NAME = 1
+CONNECTION_PRIORITY_RELATION_NAME = 2
+CONNECTION_PRIORITY_HOUSEHOLD_MEMBER = 3
 
 INDIVIDUAL_RELATED_COLUMNS = [
     "serial_number",
     "epic_number",
-    "name",
+    "voter_name",
     "relation_type",
     "relation_name",
     "age",
@@ -75,7 +94,9 @@ HOUSEHOLD_RELATED_COLUMNS = [
     "apartment_block",
     "apartment_unit_part",
     "apartment_status",
-    "apartment_names_in_house",
+    "apartment_connection",
+    "part_name_match",
+    "name_match_pct",
     "voter_link_type",
 ]
 
@@ -615,13 +636,6 @@ def roster_by_unit_group(roster_rows: pd.DataFrame) -> dict[tuple[str, str], lis
     return out
 
 
-def roster_names(roster_rows: pd.DataFrame, unit: str, group_label: str | None = None) -> str:
-    rows = roster_rows[roster_rows["unit"] == unit]
-    if group_label is not None:
-        rows = rows[rows["group_label"] == group_label]
-    return "; ".join(rows["name"].astype(str).drop_duplicates().tolist())
-
-
 def load_roster(config: ApartmentConfig) -> pd.DataFrame:
     raw = pd.read_csv(config.roster_path, dtype=str, keep_default_na=False)
     roster = raw.copy()
@@ -792,6 +806,99 @@ def source_name_items(voter: pd.Series) -> list[tuple[str, object, str]]:
     return items
 
 
+def connection_name_key(roster_name: object) -> str:
+    """Compare roster names ignoring case, spacing, punctuation, and honorifics."""
+    return "".join(token.text for token in matcher.tokenize_name(roster_name))
+
+
+def percent(score: float | None) -> int | None:
+    return None if score is None else round(100 * score)
+
+
+# (priority, full-name match %, part-name match %, roster name)
+ConnectionCandidate = tuple[int, int | None, int | None, str]
+
+
+def connection_candidates(record: dict[str, object]) -> list[ConnectionCandidate]:
+    """Roster people this voter row is connected through, with the full-name and part-name match %."""
+    candidates: list[ConnectionCandidate] = []
+    person_hits = record["person_hits"]
+    # A voter is not their own relation: if the voter name also matched the roster person
+    # that the relation name matched, prefer the voter name's other roster matches.
+    relation_keys = {connection_name_key(hit["roster_name"]) for hit in record["relation_hits"]}
+    not_relation = [hit for hit in person_hits if connection_name_key(hit["roster_name"]) not in relation_keys]
+    if not_relation:
+        person_hits = not_relation
+    for hit in person_hits:
+        candidates.append(
+            (
+                CONNECTION_PRIORITY_VOTER_NAME,
+                matcher.name_match_percent(hit["voter_name"], hit["roster_name"]),
+                percent(hit.get("part_score")),
+                str(hit["roster_name"]),
+            )
+        )
+    for hit in record["relation_hits"]:
+        candidates.append(
+            (
+                CONNECTION_PRIORITY_RELATION_NAME,
+                matcher.name_match_percent(hit["relation_name"], hit["roster_name"]),
+                percent(hit.get("part_score")),
+                str(hit["roster_name"]),
+            )
+        )
+    for link in record["member_links"]:
+        # A household member inherits the connection and match % of the voter they are linked through.
+        for roster_name in link.get("anchor_connection_names", []):
+            candidates.append(
+                (
+                    CONNECTION_PRIORITY_HOUSEHOLD_MEMBER,
+                    link.get("anchor_connection_pct"),
+                    link.get("anchor_connection_part_pct"),
+                    str(roster_name),
+                )
+            )
+    return candidates
+
+
+def select_connection(candidates: list[ConnectionCandidate]) -> tuple[list[str], int | None, int | None]:
+    """Pick the roster person(s) a row is connected through, with the full-name and part-name match %.
+
+    The voter's own name match wins over a relation-name match, which wins over a
+    household-member link. Within that, the highest full-name match % wins; equal scores are
+    all kept. Household-member links carry the match % of the voter they are linked through.
+    """
+    if not candidates:
+        return [], None, None
+    best_priority = min(candidate[0] for candidate in candidates)
+    top = [candidate for candidate in candidates if candidate[0] == best_priority]
+    scores = [pct for _, pct, _, _ in top if pct is not None]
+    best_pct = max(scores) if scores else None
+    names: list[str] = []
+    part_pcts: list[int] = []
+    seen_keys: set[str] = set()
+    for _, pct, part_pct, roster_name in top:
+        if pct != best_pct:
+            continue
+        if part_pct is not None:
+            part_pcts.append(part_pct)
+        key = connection_name_key(roster_name)
+        if key not in seen_keys:
+            seen_keys.add(key)
+            names.append(roster_name)
+    return names, best_pct, (max(part_pcts) if part_pcts else None)
+
+
+def anchor_connection(anchor_record: dict[str, object]) -> dict[str, object]:
+    """The roster connection and match % of the voter a household member is linked through."""
+    names, pct, part_pct = select_connection(connection_candidates(anchor_record))
+    return {
+        "anchor_connection_names": names,
+        "anchor_connection_pct": pct,
+        "anchor_connection_part_pct": part_pct,
+    }
+
+
 def same_address_word_link(
     voter: pd.Series,
     anchor_records: list[dict[str, object]],
@@ -817,6 +924,7 @@ def same_address_word_link(
                         "anchor_source": anchor_source,
                         "anchor_word": anchor_word,
                         "match_kind": match_kind,
+                        **anchor_connection(anchor_record),
                     }
         for voter_source, voter_name, voter_norm in voter_name_items:
             for anchor_source, anchor_name, anchor_norm in source_name_items(anchor):
@@ -830,6 +938,7 @@ def same_address_word_link(
                         "anchor_source": anchor_source,
                         "anchor_word": anchor_norm,
                         "match_kind": match.kind,
+                        **anchor_connection(anchor_record),
                     }
     return None
 
@@ -917,6 +1026,25 @@ def combine_link_types(values: pd.Series) -> str:
     return ";".join(combined)
 
 
+def direct_first_hit_units(
+    household_details: dict[tuple[str, str], dict[str, object]],
+) -> dict[int, list[str]]:
+    """Units each voter row is name-linked to: units where the voter's own name matched,
+    or, only when it matched nowhere, units where the relation name matched."""
+    direct: dict[int, set[str]] = {}
+    relation: dict[int, set[str]] = {}
+    for (unit, _group_label), evaluation in household_details.items():
+        for detail in evaluation["row_details"]:
+            row_id = int(detail["voter"]["_row_id"])
+            if detail["person_hits"]:
+                direct.setdefault(row_id, set()).add(unit)
+            elif detail["relation_hits"]:
+                relation.setdefault(row_id, set()).add(unit)
+    units = {row_id: sorted(found) for row_id, found in relation.items()}
+    units.update({row_id: sorted(found) for row_id, found in direct.items()})
+    return units
+
+
 def number_only_identity_units(
     voter: pd.Series,
     number_only_group_cache: dict[str, dict[str, object]],
@@ -960,7 +1088,7 @@ def base_output_record(voter: pd.Series, config: ApartmentConfig) -> dict[str, o
         "section_raw": voter["section_raw"],
         "serial_number": voter["serial_number"],
         "epic_number": voter["epic_number"],
-        "name": voter["name"],
+        "voter_name": voter["name"],
         "relation_type": voter["relation_type"],
         "relation_name": voter["relation_name"],
         "house_number": voter["house_number"],
@@ -975,11 +1103,15 @@ def base_output_record(voter: pd.Series, config: ApartmentConfig) -> dict[str, o
     return record
 
 
-def collapse_unresolved_group_records(
-    out: pd.DataFrame,
-    roster_rows: pd.DataFrame,
-    config: ApartmentConfig,
-) -> pd.DataFrame:
+def set_connection_fields(record: dict[str, object], candidates: list[ConnectionCandidate]) -> None:
+    names, pct, part_pct = select_connection(candidates)
+    record["apartment_connection"] = "; ".join(names)
+    record["part_name_match"] = part_pct
+    record["name_match_pct"] = pct
+    record["_connection_candidates"] = candidates
+
+
+def collapse_unresolved_group_records(out: pd.DataFrame) -> pd.DataFrame:
     if out.empty:
         return out
 
@@ -993,12 +1125,16 @@ def collapse_unresolved_group_records(
             collapsed.extend(group.to_dict("records"))
             continue
 
-        row = group.iloc[0].copy()
-        unit = str(row["apartment_unit"])
+        row = group.iloc[0].to_dict()
         row["apartment_status"] = "Unassigned"
-        row["apartment_names_in_house"] = roster_names(roster_rows, unit)
         row["voter_link_type"] = combine_link_types(group["voter_link_type"])
-        collapsed.append(row.to_dict())
+        merged_candidates = [
+            candidate
+            for candidates in group["_connection_candidates"]
+            for candidate in candidates
+        ]
+        set_connection_fields(row, merged_candidates)
+        collapsed.append(row)
 
     return pd.DataFrame(collapsed)
 
@@ -1033,6 +1169,7 @@ def build_apartment_voter_rows(
     number_only_group_cache: dict[str, dict[str, object]] = {}
     long_number_group_cache: dict[str, dict[str, object]] = {}
     records: list[dict[str, object]] = []
+    linked_items: list[tuple[dict[str, object], str, dict[str, object]]] = []
     emitted_row_unit_keys: set[tuple[int, str]] = set()
     identity_supported_row_ids: set[int] = set()
 
@@ -1091,22 +1228,13 @@ def build_apartment_voter_rows(
                         candidate_households.extend(key for key in roster if key[0] == candidate_unit)
                 candidate_households = sorted(set(candidate_households))
 
-                household_details: dict[tuple[str, str], dict[str, object]] = {}
-                row_identity_hit_keys: dict[int, list[tuple[str, str]]] = {}
-                for candidate_key in candidate_households:
-                    evaluation = matcher.evaluate_voter_rows_against_unit(group_rows, roster[candidate_key])
-                    for detail in evaluation["row_details"]:
-                        if not detail["person_hits"] and not detail["relation_hits"]:
-                            continue
-                        row_id = int(detail["voter"]["_row_id"])
-                        row_identity_hit_keys.setdefault(row_id, []).append(candidate_key)
-                    household_details[candidate_key] = evaluation
+                household_details = {
+                    candidate_key: matcher.evaluate_voter_rows_against_unit(group_rows, roster[candidate_key])
+                    for candidate_key in candidate_households
+                }
                 number_only_group_cache[group_key] = {
                     "household_details": household_details,
-                    "row_identity_hit_units": {
-                        row_id: sorted({candidate_key[0] for candidate_key in candidate_keys})
-                        for row_id, candidate_keys in row_identity_hit_keys.items()
-                    },
+                    "row_identity_hit_units": direct_first_hit_units(household_details),
                 }
 
             cached = number_only_group_cache[group_key]
@@ -1137,22 +1265,13 @@ def build_apartment_voter_rows(
                         candidate_households.extend(key for key in roster if key[0] == candidate_unit)
                 candidate_households = sorted(set(candidate_households))
 
-                household_details: dict[tuple[str, str], dict[str, object]] = {}
-                row_identity_hit_keys: dict[int, list[tuple[str, str]]] = {}
-                for candidate_key in candidate_households:
-                    evaluation = matcher.evaluate_voter_rows_against_unit(group_rows, roster[candidate_key])
-                    for detail in evaluation["row_details"]:
-                        if not detail["person_hits"] and not detail["relation_hits"]:
-                            continue
-                        row_id = int(detail["voter"]["_row_id"])
-                        row_identity_hit_keys.setdefault(row_id, []).append(candidate_key)
-                    household_details[candidate_key] = evaluation
+                household_details = {
+                    candidate_key: matcher.evaluate_voter_rows_against_unit(group_rows, roster[candidate_key])
+                    for candidate_key in candidate_households
+                }
                 long_number_group_cache[group_key] = {
                     "household_details": household_details,
-                    "row_identity_hit_units": {
-                        row_id: sorted({candidate_key[0] for candidate_key in candidate_keys})
-                        for row_id, candidate_keys in row_identity_hit_keys.items()
-                    },
+                    "row_identity_hit_units": direct_first_hit_units(household_details),
                 }
 
             cached = long_number_group_cache[group_key]
@@ -1244,7 +1363,6 @@ def build_apartment_voter_rows(
         if not all_person_hits and not all_relation_hits and not has_explicit_address:
             continue
 
-        names = roster_names(roster_rows, unit, group_label)
         evidence_rows = sorted(
             evidence_by_row.values(),
             key=lambda item: (
@@ -1255,15 +1373,30 @@ def build_apartment_voter_rows(
         )
         unit_values = unit_output_values(config, roster_rows, unit)
         for item in evidence_rows:
-            voter = item["voter"]
-            emitted_row_unit_keys.add((int(voter["_row_id"]), unit))
-            record = base_output_record(voter, config)
-            record.update(unit_values)
-            record["apartment_status"] = group_label
-            record["apartment_names_in_house"] = names
-            record["voter_link_type"] = voter_link_type(item)
-            record["_row_id"] = int(voter["_row_id"])
-            records.append(record)
+            emitted_row_unit_keys.add((int(item["voter"]["_row_id"]), unit))
+            linked_items.append((unit_values, group_label, item))
+
+    # Direct matching comes first. A voter whose own name matched a roster person keeps only
+    # those links; relation-name and household-member links apply only to voters whose own
+    # name matched no one in the apartment.
+    directly_matched_row_ids = {
+        int(item["voter"]["_row_id"]) for _, _, item in linked_items if item["person_hits"]
+    }
+    for unit_values, group_label, item in linked_items:
+        voter = item["voter"]
+        candidates = connection_candidates(item)
+        if int(voter["_row_id"]) in directly_matched_row_ids:
+            if not item["person_hits"]:
+                continue
+            item = {**item, "relation_hits": [], "member_links": []}
+            candidates = [c for c in candidates if c[0] == CONNECTION_PRIORITY_VOTER_NAME]
+        record = base_output_record(voter, config)
+        record.update(unit_values)
+        record["apartment_status"] = group_label
+        set_connection_fields(record, candidates)
+        record["voter_link_type"] = voter_link_type(item)
+        record["_row_id"] = int(voter["_row_id"])
+        records.append(record)
 
     for unit in sorted(roster_rows["unit"].unique()):
         explicit_rows = usable[
@@ -1272,7 +1405,6 @@ def build_apartment_voter_rows(
         ].copy()
         if explicit_rows.empty:
             continue
-        names = roster_names(roster_rows, unit)
         explicit_rows = explicit_rows.sort_values(["part", "serial_number", "_row_id"])
         unit_values = unit_output_values(config, roster_rows, unit)
         for _, voter in explicit_rows.iterrows():
@@ -1292,17 +1424,46 @@ def build_apartment_voter_rows(
             record = base_output_record(voter, config)
             record.update(unit_values)
             record["apartment_status"] = "Unassigned"
-            record["apartment_names_in_house"] = names
+            set_connection_fields(record, connection_candidates(item))
             record["voter_link_type"] = voter_link_type(item)
             record["_row_id"] = int(voter["_row_id"])
             records.append(record)
 
+    # Voters whose address names the apartment but does not point to exactly one roster unit
+    # (no unit read, or several possible), and who were not linked to any unit by name.
+    # They are kept with the apartment but no unit, status Unmapped.
+    linked_row_ids = {int(record["_row_id"]) for record in records} | identity_supported_row_ids
+    unmapped_rows = usable[
+        usable["has_target_label"]
+        & usable["address_unit"].isna()
+        & ~usable["_row_id"].isin(linked_row_ids)
+    ].sort_values(["part", "serial_number", "_row_id"])
+    for _, voter in unmapped_rows.iterrows():
+        record = base_output_record(voter, config)
+        record.update(
+            {
+                "apartment": config.apartment_name,
+                "apartment_unit": "",
+                "apartment_block": "",
+                "apartment_unit_part": "",
+                "apartment_status": UNMAPPED_STATUS,
+                "voter_link_type": "explicit_apartment_address",
+                "_row_id": int(voter["_row_id"]),
+            }
+        )
+        set_connection_fields(record, [])
+        records.append(record)
+
     out = pd.DataFrame(records)
-    out = collapse_unresolved_group_records(out, roster_rows, config)
+    out = collapse_unresolved_group_records(out)
     if not out.empty:
-        sort_cols = ["apartment_unit", "apartment_status", "part", "serial_number"]
+        # Unmapped rows (no unit) go after all the apartment households.
+        out["_unmapped_last"] = out["apartment_status"].eq(UNMAPPED_STATUS)
+        sort_cols = ["_unmapped_last", "apartment_unit", "apartment_status", "part", "serial_number"]
         out = out.sort_values(sort_cols).reset_index(drop=True)
-        out = out.drop(columns=["_row_id"])
+        out = out.drop(columns=["_row_id", "_connection_candidates", "_unmapped_last"])
+        out["part_name_match"] = out["part_name_match"].astype("Int64")
+        out["name_match_pct"] = out["name_match_pct"].astype("Int64")
         out = out[OUTPUT_COLUMNS]
     return out
 

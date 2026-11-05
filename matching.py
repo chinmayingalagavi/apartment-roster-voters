@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# AUTHOR: Chinmay and AI
 """Shared address, household, and name matching helpers."""
 
 from __future__ import annotations
@@ -23,7 +24,9 @@ HONORIFICS = {
     "kumari",
 }
 
-WHOLE_NAME_RATIO_THRESHOLD = 0.92
+# One similarity threshold for name parts (single words) and for whole names.
+NAME_SIMILARITY_THRESHOLD = 0.90
+WHOLE_NAME_RATIO_THRESHOLD = NAME_SIMILARITY_THRESHOLD
 WHOLE_NAME_CONTAINMENT_MIN_LENGTH = 10
 SHORT_NAME_CONTAINMENT_MIN_LENGTH = 5
 UNEXPLAINED_ADDRESS_MAX_LETTERS = 10
@@ -48,6 +51,9 @@ class NameMatch:
     matched: bool
     kind: str
     detail: str
+    # Similarity (0-1) of the name part the rule matched on: the lowest-scoring matched word
+    # pair, or the whole-name similarity for the whole-name rule.
+    part_score: float | None = None
 
 
 def normalize_space(value: object) -> str:
@@ -136,16 +142,24 @@ def tokenize_name(value: object) -> list[NameToken]:
     return tokens
 
 
-def full_token_match(left: str, right: str) -> str | None:
+def token_match_score(left: str, right: str) -> float | None:
+    """Similarity of two name words if they count as the same word, else None."""
     if len(left) <= 1 or len(right) <= 1:
         return None
     if left == right:
-        return "exact"
+        return 1.0
     if min(len(left), len(right)) >= 5:
         ratio = difflib.SequenceMatcher(None, left, right).ratio()
-        if ratio >= 0.88:
-            return f"variant:{ratio:.2f}"
+        if ratio >= NAME_SIMILARITY_THRESHOLD:
+            return ratio
     return None
+
+
+def full_token_match(left: str, right: str) -> str | None:
+    score = token_match_score(left, right)
+    if score is None:
+        return None
+    return "exact" if left == right else f"variant:{score:.2f}"
 
 
 def short_name_containment_match(left: str, right: str) -> str | None:
@@ -228,6 +242,7 @@ def whole_name_rule_match(left: object, right: object) -> NameMatch:
             True,
             "whole_name_high_ratio",
             f"{left_norm}~{right_norm}; spaced={spaced_ratio:.2f}; compact={compact_ratio:.2f}",
+            max(spaced_ratio, compact_ratio),
         )
 
     shorter, longer = sorted((left_compact, right_compact), key=len)
@@ -236,6 +251,7 @@ def whole_name_rule_match(left: object, right: object) -> NameMatch:
             True,
             "whole_name_compact_contains",
             f"{left_norm}~{right_norm}; compact_contains={shorter}",
+            1.0,
         )
 
     return NameMatch(False, "no_match", "")
@@ -243,6 +259,26 @@ def whole_name_rule_match(left: object, right: object) -> NameMatch:
 
 def normalized_name_words(value: object) -> str:
     return " ".join(token.text for token in tokenize_name(value) if token.text)
+
+
+def name_match_percent(left: object, right: object) -> int | None:
+    """Score two names from 0 to 100, ignoring case, punctuation, honorifics, spacing, and word order.
+
+    This is a descriptive similarity score for the output. It does not decide matches;
+    compare_names does. Names accepted through initials (for example "K R Sharma" and
+    "Kiran Ravi Sharma") can therefore show a low score.
+    """
+    left_words = [token.text for token in tokenize_name(left)]
+    right_words = [token.text for token in tokenize_name(right)]
+    if not left_words or not right_words:
+        return None
+    comparisons = (
+        (" ".join(left_words), " ".join(right_words)),
+        ("".join(left_words), "".join(right_words)),
+        (" ".join(sorted(left_words)), " ".join(sorted(right_words))),
+    )
+    best = max(difflib.SequenceMatcher(None, a, b).ratio() for a, b in comparisons)
+    return round(100 * best)
 
 
 def single_word_name_matches(left: object, right: object) -> list[tuple[str, str, str]]:
@@ -277,7 +313,8 @@ def compare_names(left: object, right: object) -> NameMatch:
     unique_full_pairs = {(li, ri) for li, ri, *_ in full_pairs}
     if len(unique_full_pairs) >= 2:
         detail = "; ".join(f"{lt}~{rt}({kind})" for _, _, lt, rt, kind in full_pairs[:4])
-        return NameMatch(True, "two_full_tokens", detail)
+        part_score = min(token_match_score(lt, rt) or 0.0 for _, _, lt, rt, _ in full_pairs)
+        return NameMatch(True, "two_full_tokens", detail, part_score)
 
     if len(unique_full_pairs) == 1:
         full_li, full_ri = next(iter(unique_full_pairs))
@@ -289,7 +326,7 @@ def compare_names(left: object, right: object) -> NameMatch:
                 or (is_mononym(right_tokens) and full_ri == right_tokens[0].index)
             )
         ):
-            return NameMatch(True, "mononym_exact", f"{full_pair[2]}~{full_pair[3]}(exact)")
+            return NameMatch(True, "mononym_exact", f"{full_pair[2]}~{full_pair[3]}(exact)", 1.0)
 
         initial_details: list[str] = []
         for lt in left_tokens:
@@ -312,7 +349,7 @@ def compare_names(left: object, right: object) -> NameMatch:
         if initial_details:
             detail = "; ".join(f"{lt}~{rt}({kind})" for _, _, lt, rt, kind in full_pairs[:2])
             detail += "; initials " + "; ".join(sorted(set(initial_details))[:4])
-            return NameMatch(True, "full_plus_explicit_initial", detail)
+            return NameMatch(True, "full_plus_explicit_initial", detail, token_match_score(full_pair[2], full_pair[3]))
 
     whole_match = whole_name_rule_match(left, right)
     if whole_match.matched:
@@ -324,6 +361,7 @@ def compare_names(left: object, right: object) -> NameMatch:
             True,
             "single_side_short_name_containment",
             f"{short_pair[2]}~{short_pair[3]}({short_pair[4]})",
+            1.0,
         )
 
     return NameMatch(False, "no_match", "")
@@ -486,6 +524,7 @@ def voter_person_match_hits(
                     "match_source": "voter_name",
                     "match_kind": strict_match.kind,
                     "match_detail": strict_match.detail,
+                    "part_score": strict_match.part_score,
                 }
             )
         else:
@@ -506,6 +545,7 @@ def voter_person_match_hits(
                             f"anchor {contextual_hit['anchor_source_name']} -> "
                             f"{contextual_hit['anchor_roster_name']}"
                         ),
+                        "part_score": token_match_score(contextual_hit["source_word"], contextual_hit["roster_word"]),
                     }
                 )
 
@@ -526,6 +566,7 @@ def voter_person_match_hits(
                     "match_source": "relation_name",
                     "match_kind": relation_match.kind,
                     "match_detail": relation_match.detail,
+                    "part_score": relation_match.part_score,
                 }
             )
 

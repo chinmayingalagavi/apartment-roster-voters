@@ -202,9 +202,9 @@ outputs/{apartment_key}_voters.csv
 
 Without `--output-dir`, output files are also written as `outputs/{apartment_key}_voters.csv`.
 
-Each output row is one voter-list row linked to one apartment unit.
+Each output row is one voter-list row linked to one apartment unit, except `Unmapped` rows, which are linked to the apartment only. Rows are sorted by apartment unit, then status, then voter-list order, so each household's voters sit together. `Unmapped` rows come last.
 
-Output columns include the original voter columns plus:
+Columns come in this order: apartment details, the roster connection with its part-name and full-name match %, the link type, the voter-list name and relation, then the other voter-list columns.
 
 | column | meaning |
 |---|---|
@@ -212,17 +212,31 @@ Output columns include the original voter columns plus:
 | `apartment_unit` | Normalized unit id used by the matcher. |
 | `apartment_block` | Normalized block value, if any. |
 | `apartment_unit_part` | Normalized non-block unit part. |
-| `apartment_status` | Status from the roster. |
-| `apartment_names_in_house` | Roster names in that unit and status group. |
+| `apartment_status` | Status from the roster (for example `Owner`, `Tenant`, or a `Yes`/`No` residency flag). `Unassigned`: the unit is known but the status is not (an address-only row, or a voter linked to the unit under two statuses). `Unmapped`: the address names the apartment but no single unit could be read from it; unit columns are blank. |
+| `apartment_connection` | The roster person this voter row is connected through (see below). Blank for address-only rows. |
+| `part_name_match` | 0–100 similarity of the part of the name the match rule used: the weakest matched word pair (identical words = 100), or the whole-name similarity when the whole-name rule matched. Never below 90 for a name match. Household-member rows show the value of the voter they are linked through. Blank for address-only and `Unmapped` rows. |
+| `name_match_pct` | 0–100 similarity between the voter-list name (or relation name) and `apartment_connection`. Household-member rows show the match % of the voter they are linked through. Blank for address-only and `Unmapped` rows. |
 | `voter_link_type` | Why this voter row was included. |
+| `voter_name`, `relation_type`, `relation_name` | Name fields from the voter list. `voter_name` is the voter list's `name` column. |
+| other columns | The remaining voter-list columns. |
+
+`apartment_connection` is chosen in this order:
+
+1. The roster person the voter's own name matched.
+2. Otherwise, the roster person the voter's relation name matched.
+3. Otherwise, for `same_address_household_member` rows, the roster person that the linked household member was connected through.
+
+If the voter's own name also matched the roster person their relation name matched, the voter's other name match is used when there is one. If several roster people tie at the same match %, all are listed, separated by semicolons. Spellings of one name that differ only in case, spacing, or punctuation are listed once.
+
+`name_match_pct` ignores case, punctuation, honorifics, spacing, and word order. It describes how similar the two names are; it does not decide the match. Names accepted through initials or one-word roster names (for example `Mira` against `Mira Example Name`) can show a low percentage.
 
 Common `voter_link_type` values:
 
 | value | meaning |
 |---|---|
 | `voter_name_match` | The voter name matched a roster name. |
-| `relation_name_match` | The voter relation name matched a roster name. |
-| `explicit_apartment_address` | The voter address names the apartment and points to one unit. |
+| `relation_name_match` | The voter relation name matched a roster name. Used only when the voter's own name matched no one in the apartment. |
+| `explicit_apartment_address` | The voter address names the apartment. Without a name match, the row is linked to a unit only if the address points to exactly one unit; otherwise it is `Unmapped`. |
 | `same_address_household_member` | The row shares an address with another row that matched by name or relation. |
 
 Multiple link types are separated by semicolons.
@@ -264,11 +278,11 @@ The link-type counts are not mutually exclusive. A row can have more than one li
 
 ## Matching Summary
 
-The matcher uses the address to find possible apartment units. It then checks voter names and relation names against roster names.
+The matcher uses the address to find possible apartment units. It then checks voter names against roster names. Two name words count as the same if they are identical, or both have at least 5 letters and are at least 90% similar. The whole-name rule also needs at least 90% similarity. The other rules need some words (or an initial) to agree, so the full-name `name_match_pct` can be well below 90. Relation names are checked only for voters whose own name matched no one in the apartment; a voter with a direct match keeps only their direct links.
 
-Address-only rows are included only when the address names the apartment and maps cleanly to one unit.
+Address-only rows are linked to a unit only when the address names the apartment and maps cleanly to one unit.
 
-If an address points to multiple possible units, name or relation evidence can choose the unit. If there is no name or relation evidence and the unit is ambiguous, the row is not assigned.
+If an address points to multiple possible units, name or relation evidence can choose the unit. If the address names the apartment but there is no name or relation evidence and no single unit (none found, or several possible), the row is kept with status `Unmapped` and no unit.
 
 ## Check After Edits
 
