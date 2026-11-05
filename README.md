@@ -1,294 +1,132 @@
-# Apartment voter matching
+# Apartment voter matching v6
 
-This folder contains a standalone matcher for linking apartment rosters to voter-list rows.
+V6 has two explicit modes:
 
-```sh
-python3 build_apartment_matches.py
-```
+- **Ward:** the original v5 matching rules, without polling-station filtering.
+- **AC:** suggest polling booths for each apartment, then apply the existing matching rules only to voters at the selected booths.
 
-This runs every apartment listed in `apartments.csv`.
+The AC restriction addresses repeated house numbers and names across a large constituency. It does not prove that every retained match is correct. See `COMPARISON.md` for the run on the supplied inputs.
 
-Paths below are shown from this repository folder.
+## Run
 
-## Files
-
-| path | purpose |
-|---|---|
-| `build_apartment_matches.py` | Main script. Run this file. |
-| `matching.py` | Shared address and name matching logic. |
-| `apartments.example.csv` | Template for the apartment list CSV. |
-| `apartments.csv` | Local apartment list CSV that you create from the template. |
-| `data/` | Voter-list CSV input files. |
-| `standardized_rosters/` | Apartment roster CSV input files. |
-| `outputs/` | Default output folder. |
-| `outputs/log/` | Timestamped run logs created when you run the script. |
-
-The script needs Python 3 and `pandas`.
-
-Install Python dependencies with:
+Python 3 with `pandas` is required. Excel preparation also uses `openpyxl`.
 
 ```sh
 python3 -m pip install -r requirements.txt
+
+# Original ward algorithm; apartment defaults to all.
+python3 build_apartment_matches.py --mode ward
+
+# Prepare the supplied AC workbook once. Source records are preserved.
+python3 prepare_voters.py --source ../data/AC_176_BANGALORE_SOUTH.xlsx \
+  --output data/ac_voters.csv --sheet Voters_1 --station-number-as-part
+
+# Suggest booths and match only within them.
+python3 build_apartment_matches.py --mode ac --voter-csv data/ac_voters.csv
+
+# Include an unrestricted run on the SAME AC roll for comparison.
+python3 build_apartment_matches.py concorde --mode ac \
+  --voter-csv data/ac_voters.csv --compare-baseline
 ```
 
-`apartments.csv`, `data/`, `standardized_rosters/`, and `outputs/` are local working inputs and outputs. They are ignored by git.
+AC mode requires an explicit `--voter-csv`; it never silently uses the ward input. `--output-dir` changes the output folder. `--output-csv` chooses one apartment's exact output filename.
+
+## How AC station selection works
+
+The default `--station-evidence labels-first` works independently for each apartment:
+
+1. Count voters whose addresses explicitly name the apartment. Suggest booths supported by at least **3 distinct voters at 2 distinct normalized address strings**.
+2. If no booth passes that test, use conservative exact-name seeds. Suggest booths supported by at least **3 distinct people, names, and units**. Each voter name must exactly match a multi-word roster name that identifies one roster unit globally, and the voter's address must be compatible with that unit. Initials are preserved; name word order, case, and punctuation are ignored. Fuzzy names, single-word names, relation names, and inherited household links cannot seed this fallback.
+3. Match within the selected booths only. If neither signal supports a booth, write an empty match CSV with `selection_status=no_supported_stations`, plus the station and weak-label review reports. This means insufficient search-location evidence, not that the apartment has no voters.
+
+Apartment-name evidence takes priority: exact-name clusters at other booths do not automatically widen a label-supported shortlist. `--station-evidence matches`, `labels`, and `either` expose alternatives for comparison. `--min-label-voters`, `--min-label-addresses`, and `--min-match-units` change the thresholds; defaults are initial practical rules, not statistically calibrated cutoffs.
+
+Station keys use normalized **polling name plus polling address**, including booth/room numbers. Different booths in one building remain separate. Case, punctuation, and spacing normalize; spelling differences are not fuzzy-merged. With one field absent, the available field is used with an explicit prefix. With both absent, the row cannot select or enter a booth automatically.
+
+Repeated EPIC IDs count once for discovery. Conflicting copies across stations cannot seed label evidence; conflicting station/unit copies also cannot seed exact-name evidence. Source voter rows are preserved in the matching results.
+
+## Reviewing suggested booths
+
+```sh
+# Discovery and review files only; no final matching.
+python3 build_apartment_matches.py concorde --mode ac \
+  --voter-csv data/ac_voters.csv --suggest-only
+
+# Edit the report's selected column, then rerun with the reviewed selection.
+python3 build_apartment_matches.py concorde --mode ac \
+  --voter-csv data/ac_voters.csv \
+  --stations-csv outputs/ac/polling_stations/concorde_stations.csv
+```
+
+The station report includes all observed booths, label voters/addresses, exact-match voters/units/names, automatic `suggested`, active `selected`, and the evidence `reason`. A reviewed override needs `apartment_key`, `station_key`, and `selected` (true/false). Unknown/blank selected keys and duplicate apartment/station entries are rejected. One combined override file can cover multiple apartments.
+
+Weak apartment-label rows outside the shortlist remain in a separate review file. With `--compare-baseline`, every original match excluded by the restriction is also saved. Lower output counts alone do not establish better accuracy.
 
 ## Inputs
 
-The matcher needs three kinds of CSV input:
+Local inputs and outputs are ignored by Git.
 
-1. One voter-list CSV.
-2. One apartment list CSV.
-3. One standardized roster CSV for each apartment.
-
-The default voter list is:
+`apartments.csv` identifies the apartments; use `apartments.example.csv` as a template:
 
 ```text
-data/voters.csv
+key,apartment_name,roster_path,keywords,extra_filler_terms,station_keywords
 ```
 
-The default apartment list is:
+- `key`: unique short key, also used in output filenames.
+- `apartment_name`: readable output label.
+- `roster_path`: CSV path relative to the apartment-list file.
+- `keywords`: semicolon-separated legacy matching aliases; these still control ward/address matching.
+- `extra_filler_terms`: optional address terms ignored while parsing units.
+- `station_keywords`: optional, separately reviewed discovery aliases. Without these, full/compound apartment phrases are used. Use phrases specific to this development across the **entire AC**. A bare brand such as `Concorde` also names other developments; generic `Classic` or `Oasis` is unsuitable. Explicitly supplied single-word aliases are trusted, so use them carefully.
 
-```text
-apartments.csv
-```
-
-Create it by using `apartments.example.csv` as a template.
-
-## Apartment List CSV Format
-
-The apartment list CSV tells the script which apartments to run and where their roster files are.
-
-It should have these columns:
-
-```text
-key,apartment_name,roster_path,keywords,extra_filler_terms
-```
-
-| column | meaning |
-|---|---|
-| `key` | Short apartment key. This is the command-line key and should match `apartment_key` in the roster CSV. |
-| `apartment_name` | Apartment name written to the output. |
-| `roster_path` | Path to the standardized roster CSV. Relative paths are read relative to the apartment list CSV. |
-| `keywords` | Semicolon-separated words or phrases that identify this apartment in voter addresses. Include the full apartment name, each word in the apartment name, and useful misspellings. |
-| `extra_filler_terms` | Optional semicolon-separated address words to ignore while parsing unit numbers. These terms do not identify the apartment by themselves. |
-
-Example row:
-
-```csv
-key,apartment_name,roster_path,keywords,extra_filler_terms
-sample_residency,Sample Residency,standardized_rosters/sample_residency.csv,sample residency;sample;residency;sampel residency,PHASE
-```
-
-Do not put another apartment's name in `keywords` or `extra_filler_terms`.
-
-## Roster CSV Format
-
-Each roster CSV must have these columns:
+Each standardized roster uses one row per person:
 
 ```text
 apartment_key,unit,block,unit_part,name,status
 ```
 
-| column | meaning |
-|---|---|
-| `apartment_key` | Short apartment key. If filled, it must match `key` in `apartments.csv`. Blank values are treated as the current apartment key. |
-| `unit` | Full unit id if available. It can be raw. Examples: `B102`, `B-102`, `203`, `10191`. |
-| `block` | Block, wing, tower, or row-house prefix if separate from the number. Examples: `A`, `B`, `Cedar`. Leave blank if there is no block. |
-| `unit_part` | Unit number without the block. Examples: `102`, `203`, `10191`. |
-| `name` | Person name from the apartment roster. Use one row per person. |
-| `status` | Roster status copied to the output. Examples: `Owner`, `Tenant`, `Resident`. Blank status becomes `Unknown`. |
+Provide either `unit`, such as `B-102`, or `block` plus `unit_part`. Units are normalized on load (`B-102` becomes `B102`; short numeric unit parts are padded to three digits). Status is copied from the roster. Whole-word block names and unambiguous first-letter block aliases are supported.
 
-For a blocked apartment, either of these is enough:
-
-```text
-unit=B102
-```
-
-or:
-
-```text
-block=B
-unit_part=102
-```
-
-For an apartment without blocks, put the unit number in either `unit` or `unit_part`.
-
-You do not need to fill both `unit` and `block` / `unit_part`. If both are filled and they disagree, `unit` wins.
-
-The script normalizes units before matching:
-
-| roster values | normalized unit |
-|---|---|
-| `unit=B-102` | `B102` |
-| `block=B`, `unit_part=102` | `B102` |
-| `unit=203` | `203` |
-| `unit=10191` | `10191` |
-
-Full block names are supported. If the roster has `block=Cedar`, the matcher can read voter addresses such as `Cedar 112`, `112 Cedar`, `C112`, and `C-112`, as long as `C` is not also the first letter of another block in the same apartment.
-
-## Voter CSV Format
-
-The voter CSV must have these columns:
+Both modes consume the existing voter CSV schema:
 
 ```text
 serial_number,epic_number,name,relation_type,relation_name,house_number,age,gender,section_raw,part,ward,corporation,pincode,pollingname,pollingaddress
 ```
 
-Important matching columns:
+The supplied AC workbook has no separate electoral-roll `part` column. Its explicit polling-station number is used as a local grouping key only when `prepare_voters.py --station-number-as-part` is supplied. Its global serial numbers are preserved. Missing relation types and corporation values stay blank. Conversion produces a provenance JSON with source/output hashes, field mappings, duplicate counts, missing-value counts, and the source update date. Do not assume AC/ward numbering or source coverage is interchangeable.
 
-| column | use |
-|---|---|
-| `name` | Voter name. Compared with roster names. |
-| `relation_name` | Relation name. Also compared with roster names. |
-| `house_number` | Address text. Used to find apartment names and unit numbers. |
-| `part` | Voter-list part. Used to keep number-only address groups local. |
+## Outputs and matching rules
 
-The other columns are copied into the output.
-
-## Run
-
-Run all apartments listed in `apartments.csv`:
-
-```sh
-python3 build_apartment_matches.py
-```
-
-That is the same as:
-
-```sh
-python3 build_apartment_matches.py all
-```
-
-Run all apartments and force a shared output folder:
-
-```sh
-python3 build_apartment_matches.py all --output-dir outputs
-```
-
-Run one apartment:
-
-```sh
-python3 build_apartment_matches.py <apartment_key> --output-dir outputs
-```
-
-Run one apartment and choose the exact output file:
-
-```sh
-python3 build_apartment_matches.py <apartment_key> --output-csv outputs/check.csv
-```
-
-Run with a different apartment list:
-
-```sh
-python3 build_apartment_matches.py all --apartments-csv path/to/apartments.csv --output-dir outputs
-```
-
-Run with a different voter list:
-
-```sh
-python3 build_apartment_matches.py all --voter-csv path/to/voters.csv --output-dir outputs
-```
-
-The apartment argument is optional. If omitted, it defaults to `all`. If provided, it must be `all` or one apartment key from `apartments.csv`.
-
-## Outputs
-
-With `--output-dir outputs`, output files are named:
+Default folders are `outputs/ward/` and `outputs/ac/`. Each contains `{key}_voters.csv` and timestamped logs. AC additionally writes:
 
 ```text
-outputs/{apartment_key}_voters.csv
+polling_stations/{key}_stations.csv
+review/{key}_labels_outside_stations.csv
+comparison/{key}_original_voters.csv       # with --compare-baseline
+comparison/{key}_excluded_voters.csv
+comparison/{key}_added_voters.csv
+review/{key}_multiple_units.csv
 ```
 
-Without `--output-dir`, output files are also written as `outputs/{apartment_key}_voters.csv`.
+Every match row preserves the v5 schema: apartment/unit/status, `apartment_connection`, `part_name_match`, `name_match_pct`, `voter_link_type`, and voter-list fields. `Unassigned` means the unit is known but roster status is unresolved. `Unmapped` means the apartment is identified but no single unit is established. Direct voter-name evidence takes priority over relation names; household members require address and name evidence. Address-only assignment requires an apartment label and exactly one unit candidate.
 
-Each output row is one voter-list row linked to one apartment unit, except `Unmapped` rows, which are linked to the apartment only. Rows are sorted by apartment unit, then status, then voter-list order, so each household's voters sit together. `Unmapped` rows come last.
+The existing fuzzy-name rules use 90% word/whole-name thresholds, with constrained initial and single-name rules. Similarity percentages describe name comparisons, not identity probabilities. V6 does not loosen these rules. AC uses equivalent indexed candidate lookup for speed; ward keeps the original lookup path.
 
-Columns come in this order: apartment details, the roster connection with its part-name and full-name match %, the link type, the voter-list name and relation, then the other voter-list columns.
+## Files and checks
 
-| column | meaning |
-|---|---|
-| `apartment` | Apartment name. |
-| `apartment_unit` | Normalized unit id used by the matcher. |
-| `apartment_block` | Normalized block value, if any. |
-| `apartment_unit_part` | Normalized non-block unit part. |
-| `apartment_status` | Status from the roster (for example `Owner`, `Tenant`, or a `Yes`/`No` residency flag). `Unassigned`: the unit is known but the status is not (an address-only row, or a voter linked to the unit under two statuses). `Unmapped`: the address names the apartment but no single unit could be read from it; unit columns are blank. |
-| `apartment_connection` | The roster person this voter row is connected through (see below). Blank for address-only rows. |
-| `part_name_match` | 0–100 similarity of the part of the name the match rule used: the weakest matched word pair (identical words = 100), or the whole-name similarity when the whole-name rule matched. Never below 90 for a name match. Household-member rows show the value of the voter they are linked through. Blank for address-only and `Unmapped` rows. |
-| `name_match_pct` | 0–100 similarity between the voter-list name (or relation name) and `apartment_connection`. Household-member rows show the match % of the voter they are linked through. Blank for address-only and `Unmapped` rows. |
-| `voter_link_type` | Why this voter row was included. |
-| `voter_name`, `relation_type`, `relation_name` | Name fields from the voter list. `voter_name` is the voter list's `name` column. |
-| other columns | The remaining voter-list columns. |
+`build_apartment_matches.py` runs the two modes. `ward.py` contains the original matching pipeline with optional equivalent AC indexing. `matching.py` contains the unchanged v5 name/address helpers. `polling_stations.py` builds label-based booth reports. `ac_matching.py` supplies exact seeds, the shared matcher adapter, and comparison helpers. `prepare_voters.py` streams the source Excel workbook into CSV.
 
-`apartment_connection` is chosen in this order:
-
-1. The roster person the voter's own name matched.
-2. Otherwise, the roster person the voter's relation name matched.
-3. Otherwise, for `same_address_household_member` rows, the roster person that the linked household member was connected through.
-
-If the voter's own name also matched the roster person their relation name matched, the voter's other name match is used when there is one. If several roster people tie at the same match %, all are listed, separated by semicolons. Spellings of one name that differ only in case, spacing, or punctuation are listed once.
-
-`name_match_pct` ignores case, punctuation, honorifics, spacing, and word order. It describes how similar the two names are; it does not decide the match. Names accepted through initials or one-word roster names (for example `Mira` against `Mira Example Name`) can show a low percentage.
-
-Common `voter_link_type` values:
-
-| value | meaning |
-|---|---|
-| `voter_name_match` | The voter name matched a roster name. |
-| `relation_name_match` | The voter relation name matched a roster name. Used only when the voter's own name matched no one in the apartment. |
-| `explicit_apartment_address` | The voter address names the apartment. Without a name match, the row is linked to a unit only if the address points to exactly one unit; otherwise it is `Unmapped`. |
-| `same_address_household_member` | The row shares an address with another row that matched by name or relation. |
-
-Multiple link types are separated by semicolons.
-
-## Run Logs
-
-Every run writes a timestamped JSON log:
-
-```text
-outputs/log/run_YYYYMMDD_HHMMSS.json
-```
-
-The log starts with these column lists, in this order:
-
-1. `apartments_csv_columns`: columns expected in the apartment list CSV.
-2. `individual_related_columns`: voter/person columns such as name, relation name, age, and gender.
-3. `household_related_columns`: address, unit, status, and household-link columns.
-4. `apartment_output_csv_columns`: all columns written to the generated apartment output CSV files.
-
-Then it records run metadata and one summary per apartment:
-
-| field | meaning |
-|---|---|
-| `voter_csv` | Voter-list CSV used for the run. |
-| `apartments_csv` | Apartment list CSV used for the run. |
-| `roster_rows` | Number of person rows in the apartment roster. |
-| `roster_households` | Number of unique roster units. |
-| `output_rows` | Number of voter rows written to the apartment output CSV. |
-| `output_households` | Number of unique apartment units in the output. |
-| `headline_match_rows` | Rows with a voter-name or relation-name match. |
-| `headline_match_households` | Unique units with a voter-name or relation-name match. |
-| `rows_by_status` | Output row counts by roster status. |
-| `households_by_status` | Output household counts by roster status. |
-| `rows_by_link_type` | Row counts for each match type. |
-| `households_by_link_type` | Household counts for each match type. |
-| `rows_by_exact_link_type` | Row counts for exact semicolon-combined `voter_link_type` values. |
-
-The link-type counts are not mutually exclusive. A row can have more than one link type.
-
-## Matching Summary
-
-The matcher uses the address to find possible apartment units. It then checks voter names against roster names. Two name words count as the same if they are identical, or both have at least 5 letters and are at least 90% similar. The whole-name rule also needs at least 90% similarity. The other rules need some words (or an initial) to agree, so the full-name `name_match_pct` can be well below 90. Relation names are checked only for voters whose own name matched no one in the apartment; a voter with a direct match keeps only their direct links.
-
-Address-only rows are linked to a unit only when the address names the apartment and maps cleanly to one unit.
-
-If an address points to multiple possible units, name or relation evidence can choose the unit. If the address names the apartment but there is no name or relation evidence and no single unit (none found, or several possible), the row is kept with status `Unmapped` and no unit.
-
-## Check After Edits
-
-After editing the code, run:
+`compare_runs.py --ac-csv data/ac_voters.csv` generates `COMPARISON.md` and an aggregate JSON from the completed ward and AC outputs. It distinguishes output rows, unique voters, additional voter IDs, shared ward links, and voters linked to multiple units. To include the separate Purnima one-label experiment:
 
 ```sh
-python3 -m py_compile build_apartment_matches.py matching.py
-python3 build_apartment_matches.py
+python3 build_apartment_matches.py purnima --mode ac --voter-csv data/ac_voters.csv \
+  --min-label-voters 1 --min-label-addresses 1 --output-dir outputs/ac_purnima_single_label
+python3 compare_runs.py --ac-csv data/ac_voters.csv --sensitivity-dir outputs/ac_purnima_single_label
 ```
+
+```sh
+python3 -m unittest discover -s tests -v
+python3 -m py_compile build_apartment_matches.py ac_matching.py polling_stations.py ward.py matching.py prepare_voters.py
+```
+
+The behavioral tests cover unrelated name/unit collisions, seed independence, label priority, booth identity, missing metadata, overrides, abstention, and equivalence of indexed/original matching. The supplied ward outputs were also compared byte-for-byte with v5.
