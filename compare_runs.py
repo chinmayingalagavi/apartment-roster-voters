@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 from datetime import date
 from pathlib import Path
 
@@ -80,6 +81,14 @@ def compare(args: argparse.Namespace) -> dict[str, object]:
         "shared_source_epics": len(ac_ids & ward_ids), "apartments": summaries,
         "limitation": "These are record-linkage coverage counts, not measured precision or recall against verified identities.",
     }
+    regenerate = "python3 compare_runs.py --ac-csv " + shlex.quote(str(args.ac_csv))
+    for flag, path in [
+        ("--sensitivity-dir", args.sensitivity_dir),
+        ("--ward-filter-outputs", args.ward_filter_outputs),
+        ("--ward-single-label-outputs", args.ward_single_label_outputs),
+    ]:
+        if path:
+            regenerate += " " + flag + " " + shlex.quote(str(path))
     # Only aggregate counts and booth numbers enter the Markdown report. Raw
     # voter names/EPICs/addresses remain in the local ignored CSV outputs.
     text = [
@@ -91,8 +100,9 @@ def compare(args: argparse.Namespace) -> dict[str, object]:
         "|---|---:|---:|---:|---:|---:|",
     ]
     for result in summaries:
-        text.append(f"| {result['apartment']} | {result['ward_rows']:,} | {result['ac_original_rows']:,} | {result['ac_restricted_rows']:,} | {result['selected_stations']} | {result['eligible_voters']:,} |")
-    text += ["", "Counts are output rows, each linking a source voter row to a unit or retaining an apartment-only Unmapped entry. Fewer rows do not by themselves prove higher precision.", "", "## Additional coverage and shared ward links", "",
+        restricted_label = f"{result['ac_restricted_rows']:,}" if result["selected_stations"] else "No shortlist"
+        text.append(f"| {result['apartment']} | {result['ward_rows']:,} | {result['ac_original_rows']:,} | {restricted_label} | {result['selected_stations']} | {result['eligible_voters']:,} |")
+    text += ["", "Counts are output rows, each linking a source voter row to a unit or retaining an apartment-only Unmapped entry. No shortlist means no booth was selected and matching was withheld; it is not a zero-voter finding. Fewer rows do not by themselves prove higher precision. AC relationship prefixes are parsed into relationship type and relative name; the raw field is retained in the prepared CSV.", "", "## Additional coverage and shared ward links", "",
         f"Only {payload['shared_source_epics']:,} of the ward's {payload['ward_source_unique_epics']:,} unique voter IDs appear in the AC source ({100 * payload['shared_source_epics'] / payload['ward_source_unique_epics']:.2f}%). AC is not a superset of this ward extract, so changes in total counts combine source differences and matching effects.", "",
         "| Apartment | AC original voters absent from ward output | AC restricted voters absent from ward output | Ward unit-links whose IDs occur in AC | Those links found by AC original | Those links found by AC restricted |",
         "|---|---:|---:|---:|---:|---:|",
@@ -103,15 +113,33 @@ def compare(args: argparse.Namespace) -> dict[str, object]:
     for result in summaries:
         delta = result["same_ac_comparison"]
         station_numbers = ", ".join(result["selected_station_numbers"]) or "none"
-        text.append(f"- **{result['apartment']}**: station numbers {station_numbers}. The restriction excludes {delta['excluded_original_rows']:,} original AC links and adds {delta['added_rows']:,}; excluded rows remain in the local review CSV. " + ("No station passed the automatic evidence thresholds; the empty result means abstention, not absence of voters." if not result["selected_stations"] else ""))
+        text.append(f"- **{result['apartment']}**: station numbers {station_numbers}. The restriction excludes {delta['excluded_original_rows']:,} original AC links and adds {delta['added_rows']:,}; excluded rows remain in the local review CSV. " + ("No station was selected; the empty result means matching was withheld, not absence of voters." if not result["selected_stations"] else ""))
     text += ["", "Bare Concorde brand aliases initially suggested 20 booths / 10,736 voters, including other developments such as Manhattan and Tech Turf. Restricting discovery to Midway-specific phrases selects four booths / 2,390 voters. Discovery keywords therefore need to identify a development across the entire AC, not merely its brand.", "",
         "Purnima has too little compound-label/exact-name evidence under the default thresholds. Its low-evidence booths remain in the station report for manual selection or a separately labeled threshold-sensitivity run. The matcher never silently falls back to searching the full AC.", "",
         "## Verification and simple next steps", "",
         "Ward outputs are byte-identical to v5 (350 Concorde, 48 Purnima, 415 Silicon Oasis rows). Indexed AC lookup is also byte-identical on that full ward regression. Behavioral tests cover collisions, seed independence, label priority, station identity, abstention, reviewed overrides, and indexed/original equivalence.", "",
         "Use full apartment phrases first. When labels are sparse, review clusters supported by several distinct exact names and flats rather than the raw fuzzy-match count. Review excluded matches and common-name cases before changing thresholds. Distance could later help rank nearby booths, but it needs reliable coordinates and may miss legitimate registrations at older addresses; no coordinates are provided here.", "",
-        "Regenerate this report after running AC with --compare-baseline:", "", "```sh", "python3 compare_runs.py --ac-csv data/ac_voters.csv" + (f" --sensitivity-dir outputs/{args.sensitivity_dir.name}" if args.sensitivity_dir else ""), "```", "",
+        "Regenerate this report after running AC with --compare-baseline:", "", "```sh", regenerate, "```", "",
     ]
     extra = []
+    if args.ward_filter_outputs:
+        extra += ["## Station filter tested on ward data", "", "This diagnostic applies the AC station filter to the smaller ward roll. Normal ward mode continues to use the original algorithm.", "",
+            "| Apartment | Original ward | Station filter on ward |", "|---|---:|---:|"]
+        for result in summaries:
+            filtered = pd.read_csv(args.ward_filter_outputs / f"{result['apartment_key']}_voters.csv")
+            ward_booths = pd.read_csv(args.ward_filter_outputs / "polling_stations" / f"{result['apartment_key']}_stations.csv")
+            has_shortlist = ward_booths["selected"].astype(str).str.lower().eq("true").any()
+            result["station_filter_on_ward_rows"] = len(filtered)
+            extra.append(f"| {result['apartment']} | {result['ward_rows']} | {len(filtered) if has_shortlist else 'No shortlist'} |")
+            if args.ward_single_label_outputs:
+                path = args.ward_single_label_outputs / f"{result['apartment_key']}_voters.csv"
+                if path.exists():
+                    result["single_label_on_ward_rows"] = len(pd.read_csv(path))
+        extra += ["", "For Purnima the default filter is too restrictive for sparse labels. Its ward booths have at most two apartment-labeled voters each, below the default three. Most roster names cannot supply multi-word exact seed evidence.", ""]
+        for result in summaries:
+            if "single_label_on_ward_rows" in result:
+                extra.append(f"- {result['apartment']}: lowering both ward label thresholds to one returns {result['single_label_on_ward_rows']} rows; original ward mode returns {result['ward_rows']}.")
+        extra.append("")
     if args.sensitivity_dir:
         extra += ["## One-label sensitivity experiment", "", "This separate experiment lowers both label thresholds to one. It does not change the default shortlist. A booth supported by one voter needs review.", ""]
         for result in summaries:
@@ -149,6 +177,8 @@ def main() -> None:
     parser.add_argument("--ward-outputs", type=Path, default=root / "outputs" / "ward")
     parser.add_argument("--ac-outputs", type=Path, default=root / "outputs" / "ac")
     parser.add_argument("--sensitivity-dir", type=Path, help="Optional separately generated one-label experiment")
+    parser.add_argument("--ward-filter-outputs", type=Path, help="Optional station-filter diagnostic on the ward roll")
+    parser.add_argument("--ward-single-label-outputs", type=Path, help="Optional lower-threshold ward diagnostic")
     parser.add_argument("--output", type=Path, default=root / "COMPARISON.md")
     payload = compare(parser.parse_args())
     for result in payload["apartments"]:

@@ -1,4 +1,4 @@
-# Convert an AC voter XLSX to the matcher's 15-column CSV and provenance JSON; inputs are --source, --sheet, --output, and an explicit station-number grouping option.
+# Convert an AC voter XLSX to standard voter fields plus the raw relative field and provenance; inputs are --source, --sheet, --output, and an explicit station-number grouping option.
 # AUTHOR: Chinmay and AI
 """Stream the supplied AC workbook without changing its source records."""
 
@@ -24,6 +24,7 @@ OUTPUT_COLUMNS = [
     "serial_number", "epic_number", "name", "relation_type", "relation_name",
     "house_number", "age", "gender", "section_raw", "part", "ward",
     "corporation", "pincode", "pollingname", "pollingaddress",
+    "source_relation_name",
 ]
 SOURCE_COLUMNS = {
     "serial_number": "SI. NO.",
@@ -45,6 +46,10 @@ METADATA_COLUMNS = {
     "source_update_date": "Date Of Updation:",
 }
 STATION_NUMBER_RE = re.compile(r"^\s*(\d+)\s*[-–—.:]\s*\S")
+RELATION_LABEL_TYPES = {
+    "fathersname": "Father", "husbandsname": "Husband",
+    "mothersname": "Mother", "others": "Other",
+}
 
 
 # Normalize header punctuation only; never use fuzzy header or field guesses.
@@ -58,6 +63,15 @@ def text_value(value: object) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return str(value)
+
+
+# Split only explicit source labels. Unknown prefixes and unlabeled names are
+# retained verbatim; no relationship is inferred from a person's name.
+def parse_relative_label(value: object) -> tuple[str, str]:
+    raw = text_value(value)
+    prefix, separator, remainder = raw.partition(":")
+    kind = RELATION_LABEL_TYPES.get(normalized_header(prefix)) if separator else None
+    return (kind, remainder.strip()) if kind else ("", raw)
 
 
 def integer_value(value: object, source_row: int, column: str) -> int:
@@ -116,7 +130,8 @@ def convert(source: Path, output: Path, sheet_name: str, station_number_as_part:
             for target, header in METADATA_COLUMNS.items()
             if normalized_header(header) in positions
         }
-        unavailable = [column for column in OUTPUT_COLUMNS if column not in indexes and column != "part"]
+        derived = {"part", "relation_type", "source_relation_name"}
+        unavailable = [column for column in OUTPUT_COLUMNS if column not in indexes and column not in derived]
         print(json.dumps({"sheet": sheet_name, "declared_voter_rows": sheet.max_row - 1, "mapping": {key: SOURCE_COLUMNS[key] for key in indexes}, "blank_unavailable_columns": unavailable, "part_derivation": "integer prefix of source polling-station number/name"}), flush=True)
 
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -128,6 +143,8 @@ def convert(source: Path, output: Path, sheet_name: str, station_number_as_part:
         metadata_values: dict[str, set[str]] = {key: set() for key in metadata_indexes}
         epic_types: Counter[str] = Counter()
         duplicate_epic_rows = 0
+        relation_type_counts: Counter[str] = Counter()
+        unknown_relation_prefix_rows = 0
         serial_min: int | None = None
         serial_max: int | None = None
         with temporary_csv.open("w", encoding="utf-8", newline="") as handle:
@@ -145,6 +162,13 @@ def convert(source: Path, output: Path, sheet_name: str, station_number_as_part:
                 if not station_match:
                     raise ValueError(f"Source row {source_row}: polling-station number is absent or ambiguous")
                 record["part"] = int(station_match.group(1))
+                record["source_relation_name"] = record["relation_name"]
+                kind, relative = parse_relative_label(record["source_relation_name"])
+                record["relation_type"], record["relation_name"] = kind, relative
+                if kind:
+                    relation_type_counts[kind] += 1
+                elif ":" in str(record["source_relation_name"]):
+                    unknown_relation_prefix_rows += 1
                 # Real missing values remain blank. Missing source columns and invalid
                 # serial/station identifiers fail above; records are never guessed or dropped.
                 epic_types[type(values[indexes["epic_number"]]).__name__] += 1
@@ -191,7 +215,10 @@ def convert(source: Path, output: Path, sheet_name: str, station_number_as_part:
             "unique_nonblank_epic_count": identifiers.execute("SELECT COUNT(*) FROM epics").fetchone()[0],
             "duplicate_nonblank_epic_rows": duplicate_epic_rows,
             "duplicate_handling": "All source rows are preserved; duplicates are counted with a temporary disk-backed identifier index.",
-            "relative_name_handling": "Original Relative's Name copied unchanged; no relation type inferred.",
+            "relative_name_handling": "Recognized explicit prefix before the first colon maps to relation_type; the remainder maps to relation_name. Original text is retained in source_relation_name. Unknown prefixes and plain names remain unmodified; no relationship is inferred.",
+            "relation_label_mapping": RELATION_LABEL_TYPES,
+            "relation_type_counts": dict(relation_type_counts),
+            "unrecognized_relation_prefix_rows": unknown_relation_prefix_rows,
             "blank_cell_counts": dict(blank_counts),
             "station_number_count": len(station_counts),
             "station_name_address_pair_count": len(station_pairs),

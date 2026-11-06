@@ -1,4 +1,4 @@
-# Test v6 AC discovery and matching safeguards using synthetic voter rows and temporary apartment roster/configuration CSVs.
+# Test AC relative-name preparation, booth discovery, and matching using synthetic voters and temporary apartment roster/configuration CSVs.
 # AUTHOR: Chinmay and AI
 """Behavioral regressions for station discovery, overrides and collision filtering."""
 
@@ -19,10 +19,33 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import ac_matching as ac
 import build_apartment_matches as runner
 import polling_stations as stations
+import prepare_voters
 import ward
 
 
 class PollingStationSafetyTests(unittest.TestCase):
+    def test_explicit_ac_relationship_prefixes_are_split_without_guessing(self) -> None:
+        for label, expected in [("Fathers Name", "Father"), ("Husband's Name", "Husband"), ("Mothers Name", "Mother"), ("Others", "Other")]:
+            with self.subTest(label=label):
+                self.assertEqual(prepare_voters.parse_relative_label(f"{label}: Carlos Mendes"), (expected, "Carlos Mendes"))
+
+    def test_unknown_and_plain_relative_names_are_preserved(self) -> None:
+        self.assertEqual(prepare_voters.parse_relative_label("Carlos Mendes"), ("", "Carlos Mendes"))
+        self.assertEqual(prepare_voters.parse_relative_label("Unknown: Carlos Mendes"), ("", "Unknown: Carlos Mendes"))
+        self.assertEqual(prepare_voters.parse_relative_label(None), ("", ""))
+        self.assertEqual(prepare_voters.parse_relative_label("Fathers Name: "), ("Father", ""))
+
+    def test_parsed_ac_relative_field_restores_relation_matching(self) -> None:
+        self.write_roster([("103", "Carlos")])
+        raw = "Fathers Name: Carlos Mendes"
+        voters = self.voters([self.voter("Unlisted Person", "103", "RELATIVE", relation=raw)])
+        self.assertTrue(ac.match_rows(voters, self.roster, self.config).empty)
+        kind, relative = prepare_voters.parse_relative_label(raw)
+        voters.loc[:, "relation_type"], voters.loc[:, "relation_name"] = kind, relative
+        matched = ac.match_rows(voters, self.roster, self.config)
+        self.assertEqual(len(matched), 1)
+        self.assertIn("relation_name_match", matched.loc[0, "voter_link_type"])
+
     def test_multiple_unit_review_handles_missing_nullable_scores(self) -> None:
         rows = pd.DataFrame({
             "epic_number": ["CONFLICT", "CONFLICT", "DUP", "DUP", "UNMAPPED"],

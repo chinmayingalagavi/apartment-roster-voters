@@ -93,7 +93,7 @@ Both modes consume the existing voter CSV schema:
 serial_number,epic_number,name,relation_type,relation_name,house_number,age,gender,section_raw,part,ward,corporation,pincode,pollingname,pollingaddress
 ```
 
-The supplied AC workbook has no separate electoral-roll `part` column. Its explicit polling-station number is used as a local grouping key only when `prepare_voters.py --station-number-as-part` is supplied. Its global serial numbers are preserved. Missing relation types and corporation values stay blank. Conversion produces a provenance JSON with source/output hashes, field mappings, duplicate counts, missing-value counts, and the source update date. Do not assume AC/ward numbering or source coverage is interchangeable.
+The supplied AC workbook has no separate electoral-roll `part` column. Its explicit polling-station number is used as a local grouping key only when `prepare_voters.py --station-number-as-part` is supplied. Its global serial numbers are preserved. Relative-name cells contain explicit prefixes such as `Fathers Name:`. Conversion splits recognized labels into `relation_type` and the actual `relation_name`, retaining the full original cell in an extra `source_relation_name` column. Plain names and unknown prefixes are preserved without guessing. Missing corporation values stay blank. Provenance records source/output hashes, field mappings, relationship-type counts, duplicates, missing values, and the source update date. Do not assume AC/ward numbering or source coverage is interchangeable.
 
 ## Outputs and matching rules
 
@@ -130,3 +130,14 @@ python3 -m py_compile build_apartment_matches.py ac_matching.py polling_stations
 ```
 
 The behavioral tests cover unrelated name/unit collisions, seed independence, label priority, booth identity, missing metadata, overrides, abstention, and equivalence of indexed/original matching. The supplied ward outputs were also compared byte-for-byte with v5.
+
+To diagnose the AC filter on the ward input explicitly:
+
+```sh
+python3 build_apartment_matches.py --mode ac --voter-csv data/voters.csv \
+  --output-dir outputs/ward_station_check --compare-baseline
+python3 build_apartment_matches.py purnima --mode ac --voter-csv data/voters.csv \
+  --min-label-voters 1 --min-label-addresses 1 --output-dir outputs/ward_purnima_single_label
+```
+
+These diagnostic runs do not change normal ward mode. Add `--ward-filter-outputs outputs/ward_station_check --ward-single-label-outputs outputs/ward_purnima_single_label` when generating the comparison report to include their results.
