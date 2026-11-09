@@ -49,11 +49,13 @@ APARTMENT_OUTPUT_COLUMNS = [
     "apartment_connection",
     "part_name_match",
     "name_match_pct",
+    "other_hh_matched_booth",
     "voter_link_type",
 ]
 
 # Rows read as one apartment household per unit: apartment details first, then the
-# link type, then the voter-list name and relation, then the remaining voter columns.
+# booth household count and link type, then the voter-list name and relation, then the
+# remaining voter columns.
 VOTER_NAME_COLUMNS = ["voter_name", "relation_type", "relation_name"]
 
 OUTPUT_COLUMNS = [
@@ -97,6 +99,7 @@ HOUSEHOLD_RELATED_COLUMNS = [
     "apartment_connection",
     "part_name_match",
     "name_match_pct",
+    "other_hh_matched_booth",
     "voter_link_type",
 ]
 
@@ -1464,8 +1467,23 @@ def build_apartment_voter_rows(
         out = out.drop(columns=["_row_id", "_connection_candidates", "_unmapped_last"])
         out["part_name_match"] = out["part_name_match"].astype("Int64")
         out["name_match_pct"] = out["name_match_pct"].astype("Int64")
+        out["other_hh_matched_booth"] = other_households_matched_at_booth(out)
         out = out[OUTPUT_COLUMNS]
     return out
+
+
+def other_households_matched_at_booth(out: pd.DataFrame) -> pd.Series:
+    """Count the other apartment households (units) with a matched voter at each row's polling booth.
+
+    A booth is the voter-list part with its polling station. 0 means this row's household is the
+    only one matched there. Unmapped rows have no unit, so every household at their booth counts.
+    """
+    booth = out["part"].fillna("").astype(str) + "|" + out["pollingname"].fillna("").astype(str)
+    units = out["apartment_unit"].fillna("").astype(str)
+    has_unit = units.ne("")
+    households_at_booth = units[has_unit].groupby(booth[has_unit]).nunique()
+    count = booth.map(households_at_booth).fillna(0).astype(int)
+    return count - has_unit.astype(int)
 
 
 def run_one(config: ApartmentConfig, voter_csv: Path, output_csv: Path | None = None) -> pd.DataFrame:

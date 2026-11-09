@@ -70,14 +70,14 @@ key,apartment_name,roster_path,keywords,extra_filler_terms
 | `key` | Short apartment key. This is the command-line key and should match `apartment_key` in the roster CSV. |
 | `apartment_name` | Apartment name written to the output. |
 | `roster_path` | Path to the standardized roster CSV. Relative paths are read relative to the apartment list CSV. |
-| `keywords` | Semicolon-separated words or phrases that identify this apartment in voter addresses. Include the full apartment name, each word in the apartment name, and useful misspellings. |
+| `keywords` | Semicolon-separated phrases that identify this apartment in voter addresses. Use only the full apartment name and full-length misspellings of it. Do not add single words from the name, shortened forms, or anything that could name another place: a word like `classic` or `oasis` also matches other developments. |
 | `extra_filler_terms` | Optional semicolon-separated address words to ignore while parsing unit numbers. These terms do not identify the apartment by themselves. |
 
 Example row:
 
 ```csv
 key,apartment_name,roster_path,keywords,extra_filler_terms
-sample_residency,Sample Residency,standardized_rosters/sample_residency.csv,sample residency;sample;residency;sampel residency,PHASE
+sample_residency,Sample Residency,standardized_rosters/sample_residency.csv,sample residency;sampel residency,PHASE
 ```
 
 Do not put another apartment's name in `keywords` or `extra_filler_terms`.
@@ -204,7 +204,7 @@ Without `--output-dir`, output files are also written as `outputs/{apartment_key
 
 Each output row is one voter-list row linked to one apartment unit, except `Unmapped` rows, which are linked to the apartment only. Rows are sorted by apartment unit, then status, then voter-list order, so each household's voters sit together. `Unmapped` rows come last.
 
-Columns come in this order: apartment details, the roster connection with its part-name and full-name match %, the link type, the voter-list name and relation, then the other voter-list columns.
+Columns come in this order: apartment details, the roster connection with its part-name and full-name match %, the count of other households matched at the same booth, the link type, the voter-list name and relation, then the other voter-list columns.
 
 | column | meaning |
 |---|---|
@@ -216,6 +216,7 @@ Columns come in this order: apartment details, the roster connection with its pa
 | `apartment_connection` | The roster person this voter row is connected through (see below). Blank for address-only rows. |
 | `part_name_match` | 0–100 similarity of the part of the name the match rule used: the weakest matched word pair (identical words = 100), or the whole-name similarity when the whole-name rule matched. Never below 90 for a name match. Household-member rows show the value of the voter they are linked through. Blank for address-only and `Unmapped` rows. |
 | `name_match_pct` | 0–100 similarity between the voter-list name (or relation name) and `apartment_connection`. Household-member rows show the match % of the voter they are linked through. Blank for address-only and `Unmapped` rows. |
+| `other_hh_matched_booth` | Number of other apartment households (units) with at least one matched voter at this row's polling booth (`part`). 0 means this row's household is the only one matched there. `Unmapped` rows have no unit, so every household matched at their booth counts. A building's residents usually share a few booths, so real matches tend to have many other households at their booth, while chance name matches are often alone. |
 | `voter_link_type` | Why this voter row was included. |
 | `voter_name`, `relation_type`, `relation_name` | Name fields from the voter list. `voter_name` is the voter list's `name` column. |
 | other columns | The remaining voter-list columns. |
