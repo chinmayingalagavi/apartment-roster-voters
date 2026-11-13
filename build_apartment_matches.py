@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # AUTHOR: Chinmay and AI
-"""Build linked voter CSVs for apartments from standardized roster CSVs."""
+"""Build an Excel workbook per apartment from a voter-list CSV and a standardized roster CSV.
+
+Sheet 1 (voters) lists the voter-list rows linked to the apartment. Sheet 2 (roster_not_matched)
+lists the roster rows that no voter row is connected through, as they appear in the roster CSV.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
+from openpyxl.utils import get_column_letter
 
 import matching as matcher
 
@@ -63,6 +68,11 @@ OUTPUT_COLUMNS = [
     *VOTER_NAME_COLUMNS,
     *[column for column in VOTER_OUTPUT_COLUMNS if column not in VOTER_NAME_COLUMNS],
 ]
+
+# Output workbook sheets: the linked voter rows, then the roster rows no voter row is connected through.
+VOTERS_SHEET = "voters"
+ROSTER_NOT_MATCHED_SHEET = "roster_not_matched"
+MAX_EXCEL_COLUMN_WIDTH = 50
 
 # Status for voters whose address names the apartment but maps to no single unit.
 UNMAPPED_STATUS = "Unmapped"
@@ -1112,6 +1122,7 @@ def set_connection_fields(record: dict[str, object], candidates: list[Connection
     record["part_name_match"] = part_pct
     record["name_match_pct"] = pct
     record["_connection_candidates"] = candidates
+    record["_connection_names"] = names
 
 
 def collapse_unresolved_group_records(out: pd.DataFrame) -> pd.DataFrame:
@@ -1147,7 +1158,8 @@ def build_apartment_voter_rows(
     roster_rows: pd.DataFrame,
     roster: dict[tuple[str, str], list[dict[str, object]]],
     config: ApartmentConfig,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, set[tuple[str, str]]]:
+    """Return the output voter rows and the (unit, roster name key) pairs they are connected through."""
     usable = voters.copy()
     identity_usable = voters.copy()
     number_only_groups = {
@@ -1459,17 +1471,24 @@ def build_apartment_voter_rows(
 
     out = pd.DataFrame(records)
     out = collapse_unresolved_group_records(out)
-    if not out.empty:
-        # Unmapped rows (no unit) go after all the apartment households.
-        out["_unmapped_last"] = out["apartment_status"].eq(UNMAPPED_STATUS)
-        sort_cols = ["_unmapped_last", "apartment_unit", "apartment_status", "part", "serial_number"]
-        out = out.sort_values(sort_cols).reset_index(drop=True)
-        out = out.drop(columns=["_row_id", "_connection_candidates", "_unmapped_last"])
-        out["part_name_match"] = out["part_name_match"].astype("Int64")
-        out["name_match_pct"] = out["name_match_pct"].astype("Int64")
-        out["other_hh_matched_booth"] = other_households_matched_at_booth(out)
-        out = out[OUTPUT_COLUMNS]
-    return out
+    connected: set[tuple[str, str]] = set()
+    if out.empty:
+        return pd.DataFrame(columns=OUTPUT_COLUMNS), connected
+    # A row's connection names are roster people in that row's own unit.
+    connected = {
+        (str(unit), connection_name_key(name))
+        for unit, names in zip(out["apartment_unit"], out["_connection_names"])
+        for name in names
+    }
+    # Unmapped rows (no unit) go after all the apartment households.
+    out["_unmapped_last"] = out["apartment_status"].eq(UNMAPPED_STATUS)
+    sort_cols = ["_unmapped_last", "apartment_unit", "apartment_status", "part", "serial_number"]
+    out = out.sort_values(sort_cols).reset_index(drop=True)
+    out = out.drop(columns=["_row_id", "_connection_candidates", "_connection_names", "_unmapped_last"])
+    out["part_name_match"] = out["part_name_match"].astype("Int64")
+    out["name_match_pct"] = out["name_match_pct"].astype("Int64")
+    out["other_hh_matched_booth"] = other_households_matched_at_booth(out)
+    return out[OUTPUT_COLUMNS], connected
 
 
 def other_households_matched_at_booth(out: pd.DataFrame) -> pd.Series:
@@ -1486,12 +1505,69 @@ def other_households_matched_at_booth(out: pd.DataFrame) -> pd.Series:
     return count - has_unit.astype(int)
 
 
-def run_one(config: ApartmentConfig, voter_csv: Path, output_csv: Path | None = None) -> pd.DataFrame:
+def roster_rows_not_matched(
+    config: ApartmentConfig,
+    roster_rows: pd.DataFrame,
+    connected: set[tuple[str, str]],
+) -> pd.DataFrame:
+    """Roster CSV rows that no output voter row is connected through, unchanged and in roster order.
+
+    A roster person is matched when an output row in their unit names them in apartment_connection.
+    Rows the matcher cannot use (blank name or no unit) are never matched, so they are listed too.
+    """
+    raw = pd.read_csv(config.roster_path, dtype=str, keep_default_na=False)
+    is_connected = [
+        (str(unit), connection_name_key(name)) in connected
+        for unit, name in zip(roster_rows["unit"], roster_rows["name"])
+    ]
+    # load_roster keeps the roster CSV's row index, so it points back to the raw rows.
+    matched_index = roster_rows.index[is_connected]
+    return raw[~raw.index.isin(matched_index)].reset_index(drop=True)
+
+
+def excel_ready(frame: pd.DataFrame) -> pd.DataFrame:
+    """Write text columns as text: a column read with mixed numbers and text becomes all text."""
+    frame = frame.copy()
+    for column in frame.columns:
+        if frame[column].dtype == object:
+            values = frame[column]
+            frame[column] = values.where(values.isna(), values.astype(str))
+    return frame
+
+
+def format_sheet(sheet, frame: pd.DataFrame) -> None:
+    """Keep text that starts with '=' as text, freeze the header row, add filters, and size columns."""
+    for row in sheet.iter_rows(min_row=2):
+        for cell in row:
+            if cell.data_type == "f":
+                cell.data_type = "s"
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    for position, column in enumerate(frame.columns, start=1):
+        lengths = [len(str(column)), *(len(str(value)) for value in frame[column].dropna())]
+        sheet.column_dimensions[get_column_letter(position)].width = min(max(lengths) + 2, MAX_EXCEL_COLUMN_WIDTH)
+
+
+def write_output_workbook(destination: Path, voter_rows: pd.DataFrame, roster_not_matched: pd.DataFrame) -> None:
+    with pd.ExcelWriter(destination, engine="openpyxl") as writer:
+        for sheet_name, frame in ((VOTERS_SHEET, voter_rows), (ROSTER_NOT_MATCHED_SHEET, roster_not_matched)):
+            frame = excel_ready(frame)
+            frame.to_excel(writer, sheet_name=sheet_name, index=False)
+            format_sheet(writer.sheets[sheet_name], frame)
+
+
+def run_one(
+    config: ApartmentConfig,
+    voter_csv: Path,
+    output_xlsx: Path | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Match one apartment, write its workbook, and return the voter rows and the roster rows not matched."""
     voters, roster_rows, roster = load_data(voter_csv, config)
-    out = build_apartment_voter_rows(voters, roster_rows, roster, config)
-    destination = output_csv or default_output_csv(config)
+    out, connected = build_apartment_voter_rows(voters, roster_rows, roster, config)
+    not_matched = roster_rows_not_matched(config, roster_rows, connected)
+    destination = output_xlsx or default_output_xlsx(config)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    out.to_csv(destination, index=False)
+    write_output_workbook(destination, out, not_matched)
     print(f"{config.key}: rows: {len(out)}")
     if not out.empty:
         print(out["apartment_status"].value_counts().to_string())
@@ -1503,12 +1579,13 @@ def run_one(config: ApartmentConfig, voter_csv: Path, output_csv: Path | None = 
             "explicit_apartment_address_rows: "
             f"{int(out['voter_link_type'].str.contains('explicit_apartment_address', regex=False).sum())}"
         )
-    print(f"output_csv: {destination}")
-    return out
+    print(f"roster_rows_not_matched: {len(not_matched)}")
+    print(f"output_xlsx: {destination}")
+    return out, not_matched
 
 
-def default_output_csv(config: ApartmentConfig) -> Path:
-    return PROJECT_ROOT / "outputs" / f"{config.key}_voters.csv"
+def default_output_xlsx(config: ApartmentConfig) -> Path:
+    return PROJECT_ROOT / "outputs" / f"{config.key}_voters.xlsx"
 
 
 def household_count(rows: pd.DataFrame) -> int:
@@ -1547,7 +1624,8 @@ def apartment_run_summary(
     config: ApartmentConfig,
     roster_rows: pd.DataFrame,
     output_rows: pd.DataFrame,
-    output_csv: Path,
+    roster_not_matched: pd.DataFrame,
+    output_xlsx: Path,
 ) -> dict[str, object]:
     identity_rows = output_rows[
         output_rows["voter_link_type"].str.contains("voter_name_match", regex=False, na=False)
@@ -1558,9 +1636,10 @@ def apartment_run_summary(
         "apartment_key": config.key,
         "apartment_name": config.apartment_name,
         "roster_csv": path_for_log(config.roster_path),
-        "output_csv": path_for_log(output_csv),
+        "output_xlsx": path_for_log(output_xlsx),
         "roster_rows": int(len(roster_rows)),
         "roster_households": int(roster_rows["unit"].nunique()),
+        "roster_rows_not_matched": int(len(roster_not_matched)),
         "output_rows": int(len(output_rows)),
         "output_households": household_count(output_rows),
         "headline_match_rows": int(len(identity_rows)),
@@ -1599,7 +1678,7 @@ def write_run_log(
         "apartments_csv_columns": APARTMENT_CONFIG_COLUMNS,
         "individual_related_columns": INDIVIDUAL_RELATED_COLUMNS,
         "household_related_columns": HOUSEHOLD_RELATED_COLUMNS,
-        "apartment_output_csv_columns": OUTPUT_COLUMNS,
+        "voters_sheet_columns": OUTPUT_COLUMNS,
         "generated_at": generated_at.isoformat(timespec="seconds"),
         "voter_csv": path_for_log(voter_csv),
         "apartments_csv": path_for_log(apartments_csv),
@@ -1616,7 +1695,7 @@ def main() -> None:
     parser.add_argument("apartment", nargs="?", default="all")
     parser.add_argument("--apartments-csv", type=Path, default=DEFAULT_APARTMENTS_CSV)
     parser.add_argument("--voter-csv", type=Path, default=DEFAULT_VOTER_CSV)
-    parser.add_argument("--output-csv", type=Path)
+    parser.add_argument("--output-xlsx", type=Path)
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
 
@@ -1626,46 +1705,46 @@ def main() -> None:
         raise SystemExit(f"Unknown apartment key: {args.apartment}. Available keys: {available}")
 
     if args.apartment == "all":
-        if args.output_csv:
-            raise SystemExit("--output-csv can only be used with one apartment")
+        if args.output_xlsx:
+            raise SystemExit("--output-xlsx can only be used with one apartment")
         output_root = args.output_dir or PROJECT_ROOT / "outputs"
         output_root.mkdir(parents=True, exist_ok=True)
         summaries: list[dict[str, object]] = []
         for config in configs.values():
-            output_csv = output_root / f"{config.key}_voters.csv"
-            out = run_one(config, args.voter_csv, output_csv)
+            output_xlsx = output_root / f"{config.key}_voters.xlsx"
+            out, not_matched = run_one(config, args.voter_csv, output_xlsx)
             roster_rows = load_roster(config)
-            summaries.append(apartment_run_summary(config, roster_rows, out, output_csv))
+            summaries.append(apartment_run_summary(config, roster_rows, out, not_matched, output_xlsx))
         log_path = write_run_log(output_root, args.voter_csv, args.apartments_csv, summaries)
         print(f"run_log: {log_path}")
         return
 
     if args.output_dir:
-        if args.output_csv:
-            raise SystemExit("--output-dir and --output-csv cannot be used together")
+        if args.output_xlsx:
+            raise SystemExit("--output-dir and --output-xlsx cannot be used together")
         config = configs[args.apartment]
         args.output_dir.mkdir(parents=True, exist_ok=True)
-        output_csv = args.output_dir / f"{config.key}_voters.csv"
-        out = run_one(config, args.voter_csv, output_csv)
+        output_xlsx = args.output_dir / f"{config.key}_voters.xlsx"
+        out, not_matched = run_one(config, args.voter_csv, output_xlsx)
         roster_rows = load_roster(config)
         log_path = write_run_log(
             args.output_dir,
             args.voter_csv,
             args.apartments_csv,
-            [apartment_run_summary(config, roster_rows, out, output_csv)],
+            [apartment_run_summary(config, roster_rows, out, not_matched, output_xlsx)],
         )
         print(f"run_log: {log_path}")
         return
 
     config = configs[args.apartment]
-    out = run_one(config, args.voter_csv, args.output_csv)
-    output_csv = args.output_csv or default_output_csv(config)
+    out, not_matched = run_one(config, args.voter_csv, args.output_xlsx)
+    output_xlsx = args.output_xlsx or default_output_xlsx(config)
     roster_rows = load_roster(config)
     log_path = write_run_log(
         PROJECT_ROOT / "outputs",
         args.voter_csv,
         args.apartments_csv,
-        [apartment_run_summary(config, roster_rows, out, output_csv)],
+        [apartment_run_summary(config, roster_rows, out, not_matched, output_xlsx)],
     )
     print(f"run_log: {log_path}")
 

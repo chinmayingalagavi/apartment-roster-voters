@@ -23,7 +23,7 @@ Paths below are shown from this repository folder.
 | `outputs/` | Default output folder. |
 | `outputs/log/` | Timestamped run logs created when you run the script. |
 
-The script needs Python 3 and `pandas`.
+The script needs Python 3, `pandas`, and `openpyxl` (for the Excel output).
 
 Install Python dependencies with:
 
@@ -175,7 +175,7 @@ python3 build_apartment_matches.py <apartment_key> --output-dir outputs
 Run one apartment and choose the exact output file:
 
 ```sh
-python3 build_apartment_matches.py <apartment_key> --output-csv outputs/check.csv
+python3 build_apartment_matches.py <apartment_key> --output-xlsx outputs/check.xlsx
 ```
 
 Run with a different apartment list:
@@ -194,15 +194,26 @@ The apartment argument is optional. If omitted, it defaults to `all`. If provide
 
 ## Outputs
 
-With `--output-dir outputs`, output files are named:
+Each apartment gets one Excel workbook. With `--output-dir outputs`, workbooks are named:
 
 ```text
-outputs/{apartment_key}_voters.csv
+outputs/{apartment_key}_voters.xlsx
 ```
 
-Without `--output-dir`, output files are also written as `outputs/{apartment_key}_voters.csv`.
+Without `--output-dir`, workbooks are also written as `outputs/{apartment_key}_voters.xlsx`.
 
-Each output row is one voter-list row linked to one apartment unit, except `Unmapped` rows, which are linked to the apartment only. Rows are sorted by apartment unit, then status, then voter-list order, so each household's voters sit together. `Unmapped` rows come last.
+Each workbook has two sheets:
+
+| sheet | contents |
+|---|---|
+| `voters` | The voter-list rows linked to the apartment, described below. |
+| `roster_not_matched` | The roster rows that no voter row is connected through, exactly as they appear in the roster CSV and in roster order. |
+
+Together, the roster people named in `apartment_connection` on the `voters` sheet and the rows on the `roster_not_matched` sheet cover the whole roster. A roster person counts as matched only when a voter row in their own unit names them in `apartment_connection`. A roster person whose household was found through someone else, or only through an address, is still listed on `roster_not_matched`.
+
+### `voters` sheet
+
+Each row is one voter-list row linked to one apartment unit, except `Unmapped` rows, which are linked to the apartment only. Rows are sorted by apartment unit, then status, then voter-list order, so each household's voters sit together. `Unmapped` rows come last.
 
 Columns come in this order: apartment details, the roster connection with its part-name and full-name match %, the count of other households matched at the same booth, the link type, the voter-list name and relation, then the other voter-list columns.
 
@@ -255,7 +266,7 @@ The log starts with these column lists, in this order:
 1. `apartments_csv_columns`: columns expected in the apartment list CSV.
 2. `individual_related_columns`: voter/person columns such as name, relation name, age, and gender.
 3. `household_related_columns`: address, unit, status, and household-link columns.
-4. `apartment_output_csv_columns`: all columns written to the generated apartment output CSV files.
+4. `voters_sheet_columns`: all columns on the `voters` sheet of each output workbook.
 
 Then it records run metadata and one summary per apartment:
 
@@ -263,9 +274,11 @@ Then it records run metadata and one summary per apartment:
 |---|---|
 | `voter_csv` | Voter-list CSV used for the run. |
 | `apartments_csv` | Apartment list CSV used for the run. |
+| `output_xlsx` | Output workbook written for the apartment. |
 | `roster_rows` | Number of person rows in the apartment roster. |
 | `roster_households` | Number of unique roster units. |
-| `output_rows` | Number of voter rows written to the apartment output CSV. |
+| `roster_rows_not_matched` | Number of rows on the `roster_not_matched` sheet. |
+| `output_rows` | Number of voter rows on the `voters` sheet. |
 | `output_households` | Number of unique apartment units in the output. |
 | `headline_match_rows` | Rows with a voter-name or relation-name match. |
 | `headline_match_households` | Unique units with a voter-name or relation-name match. |
