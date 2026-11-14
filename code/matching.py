@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # AUTHOR: Chinmay and AI
-"""Shared address, household, and name matching helpers."""
+"""Match voter-list addresses and names against roster units and people."""
 
 from __future__ import annotations
 
@@ -441,19 +441,14 @@ def proper_anchor_hit(
 
 
 def proper_anchor_hits_for_rows(rows: pd.DataFrame, roster: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Find own-name matches that can support contextual name matching."""
     anchors: list[dict[str, object]] = []
     for _, voter in rows.iterrows():
         for person in roster:
-            for source_kind, source_name in (
-                ("voter_name", voter["name"]),
-                ("relation_name", voter["relation_name"]),
-            ):
-                match = compare_names(source_name, person["name"])
-                if (
-                    match_allowed_for_source(source_kind, match)
-                    and first_identity_anchor_matches(source_name, person["name"])
-                ):
-                    anchors.append(proper_anchor_hit(voter, source_kind, source_name, person, match))
+            name = voter["name"]
+            match = compare_names(name, person["name"])
+            if match.matched and first_identity_anchor_matches(name, person["name"]):
+                anchors.append(proper_anchor_hit(voter, "voter_name", name, person, match))
     return anchors
 
 
@@ -495,6 +490,8 @@ def contextual_anchor_word_hit(
                 "roster_word": roster_word,
                 "match_kind": "anchor_contextual_one_word",
                 "match_detail": f"{source_word}~{roster_word}({match_kind})",
+                "anchor_voter_row_id": anchor["voter_row_id"],
+                "anchor_roster_row_id": anchor["roster_row_id"],
                 "anchor_source_name": anchor["source_name"],
                 "anchor_roster_name": anchor["roster_name"],
                 "anchor_match_kind": anchor["match_kind"],
@@ -545,6 +542,8 @@ def voter_person_match_hits(
                             f"anchor {contextual_hit['anchor_source_name']} -> "
                             f"{contextual_hit['anchor_roster_name']}"
                         ),
+                        "anchor_voter_row_id": contextual_hit["anchor_voter_row_id"],
+                        "anchor_roster_row_id": contextual_hit["anchor_roster_row_id"],
                         "part_score": token_match_score(contextual_hit["source_word"], contextual_hit["roster_word"]),
                     }
                 )

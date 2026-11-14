@@ -5,6 +5,7 @@
 Read apartment settings from data/apartments.csv and standardize source rosters in memory.
 The workbook lists voters linked to a unit, household groups whose address names the
 apartment without a unit link, and roster rows that no voter row is connected through.
+Relation and household links require a voter directly matched to the same flat.
 """
 
 from __future__ import annotations
@@ -1072,21 +1073,6 @@ def add_household_member(
     record["member_links"].append(member_link)
 
 
-def add_explicit_apartment_address(evidence_by_row: dict[int, dict[str, object]], voter: pd.Series) -> None:
-    row_id = int(voter["_row_id"])
-    record = evidence_by_row.setdefault(
-        row_id,
-        {
-            "voter": voter,
-            "person_hits": [],
-            "relation_hits": [],
-            "scopes": set(),
-            "member_links": [],
-        },
-    )
-    record["scopes"].add("explicit_apartment_address")
-
-
 def voter_link_type(record: dict[str, object]) -> str:
     link_types: list[str] = []
     if record["person_hits"]:
@@ -1109,36 +1095,21 @@ def combine_link_types(values: pd.Series) -> str:
     return ";".join(combined)
 
 
-def direct_first_hit_units(
+def direct_hit_units(
     household_details: dict[tuple[str, str], dict[str, object]],
 ) -> dict[int, list[str]]:
-    """Units each voter row is name-linked to: units where the voter's own name matched,
-    or, only when it matched nowhere, units where the relation name matched."""
+    """Return units with own-name evidence, giving independent matches priority."""
     direct: dict[int, set[str]] = {}
-    relation: dict[int, set[str]] = {}
+    contextual: dict[int, set[str]] = {}
     for (unit, _group_label), evaluation in household_details.items():
         for detail in evaluation["row_details"]:
             row_id = int(detail["voter"]["_row_id"])
-            if detail["person_hits"]:
-                direct.setdefault(row_id, set()).add(unit)
-            elif detail["relation_hits"]:
-                relation.setdefault(row_id, set()).add(unit)
-    units = {row_id: sorted(found) for row_id, found in relation.items()}
+            for hit in detail["person_hits"]:
+                matches = contextual if "anchor_voter_row_id" in hit else direct
+                matches.setdefault(row_id, set()).add(unit)
+    units = {row_id: sorted(found) for row_id, found in contextual.items()}
     units.update({row_id: sorted(found) for row_id, found in direct.items()})
     return units
-
-
-def number_only_identity_units(
-    voter: pd.Series,
-    number_only_group_cache: dict[str, dict[str, object]],
-) -> set[str]:
-    group_key = str(voter.get("number_only_address_key", ""))
-    if not group_key:
-        return set()
-    cached = number_only_group_cache.get(group_key)
-    if not cached:
-        return set()
-    return set(cached["row_identity_hit_units"].get(int(voter["_row_id"]), []))
 
 
 def unit_output_values(config: ApartmentConfig, roster_rows: pd.DataFrame, unit: str) -> dict[str, object]:
@@ -1272,7 +1243,7 @@ def build_apartment_voter_rows(
     number_only_group_cache: dict[str, dict[str, object]] = {}
     long_number_group_cache: dict[str, dict[str, object]] = {}
     records: list[dict[str, object]] = []
-    linked_items: list[tuple[dict[str, object], str, dict[str, object]]] = []
+    unit_evidence: dict[tuple[str, str], dict[int, dict[str, object]]] = {}
     emitted_row_unit_keys: set[tuple[int, str]] = set()
     identity_supported_row_ids: set[int] = set()
 
@@ -1337,21 +1308,19 @@ def build_apartment_voter_rows(
                 }
                 number_only_group_cache[group_key] = {
                     "household_details": household_details,
-                    "row_identity_hit_units": direct_first_hit_units(household_details),
+                    "row_identity_hit_units": direct_hit_units(household_details),
                 }
 
             cached = number_only_group_cache[group_key]
             for detail in cached["household_details"].get((unit, group_label), {}).get("row_details", []):
-                if not detail["person_hits"] and not detail["relation_hits"]:
-                    continue
-                if set(cached["row_identity_hit_units"].get(int(detail["voter"]["_row_id"]), [])) != {unit}:
-                    continue
+                row_id = int(detail["voter"]["_row_id"])
+                own_name_units = cached["row_identity_hit_units"].get(row_id, [])
                 add_evidence(
                     evidence_by_row,
                     detail["voter"],
-                    detail["person_hits"],
+                    detail["person_hits"] if own_name_units == [unit] else [],
                     detail["relation_hits"],
-                    "number_only_address_relation_unique",
+                    "number_only_address",
                 )
 
         long_number_rows = unit_rows[
@@ -1374,51 +1343,88 @@ def build_apartment_voter_rows(
                 }
                 long_number_group_cache[group_key] = {
                     "household_details": household_details,
-                    "row_identity_hit_units": direct_first_hit_units(household_details),
+                    "row_identity_hit_units": direct_hit_units(household_details),
                 }
 
             cached = long_number_group_cache[group_key]
             for detail in cached["household_details"].get((unit, group_label), {}).get("row_details", []):
-                if not detail["person_hits"] and not detail["relation_hits"]:
-                    continue
-                if set(cached["row_identity_hit_units"].get(int(detail["voter"]["_row_id"]), [])) != {unit}:
-                    continue
+                row_id = int(detail["voter"]["_row_id"])
+                own_name_units = cached["row_identity_hit_units"].get(row_id, [])
                 add_evidence(
                     evidence_by_row,
                     detail["voter"],
-                    detail["person_hits"],
+                    detail["person_hits"] if own_name_units == [unit] else [],
                     detail["relation_hits"],
-                    "long_number_address_relation_unique",
+                    "long_number_address",
                 )
 
-        direct_evidence_row_ids = {
-            row_id
-            for row_id, record in evidence_by_row.items()
-            if record["person_hits"] or record["relation_hits"]
-        }
-        anchored_group_keys = sorted(
-            {
-                str(record["voter"].get("same_address_group_key", ""))
-                for row_id, record in evidence_by_row.items()
-                if row_id in direct_evidence_row_ids and str(record["voter"].get("same_address_group_key", ""))
-            }
-        )
-        for group_key in anchored_group_keys:
-            group_rows = same_address_groups.get(group_key)
-            if group_rows is None or group_rows.empty:
-                continue
-            anchor_records = [
-                evidence_by_row[row_id]
-                for row_id in direct_evidence_row_ids
-                if str(evidence_by_row[row_id]["voter"].get("same_address_group_key", "")) == group_key
+        if evidence_by_row:
+            unit_evidence[(unit, group_label)] = evidence_by_row
+
+    # Resolve own-name links before checking any dependent evidence.
+    independent_hits = {
+        (unit, row_id, hit["roster_row_id"])
+        for (unit, _), evidence_by_row in unit_evidence.items()
+        for row_id, record in evidence_by_row.items()
+        for hit in record["person_hits"]
+        if "anchor_voter_row_id" not in hit
+    }
+    direct_row_ids: set[int] = set()
+    linked_people: dict[tuple[str, int], dict[int, object]] = {}
+    for (unit, _), evidence_by_row in unit_evidence.items():
+        for row_id, record in evidence_by_row.items():
+            record["person_hits"] = [
+                hit for hit in record["person_hits"]
+                if "anchor_voter_row_id" not in hit
+                or (unit, hit["anchor_voter_row_id"], hit["anchor_roster_row_id"]) in independent_hits
             ]
+            for hit in record["person_hits"]:
+                direct_row_ids.add(row_id)
+                linked_people.setdefault((unit, hit["roster_row_id"]), {})[row_id] = hit["voter_name"]
+
+    # A relation must identify a different voter whose own name links that person to this flat.
+    relation_units: dict[int, set[str]] = {}
+    for (unit, _), evidence_by_row in unit_evidence.items():
+        for row_id, record in evidence_by_row.items():
+            record["relation_hits"] = [
+                hit for hit in record["relation_hits"]
+                if any(
+                    other_row_id != row_id
+                    and matcher.match_allowed_for_source(
+                        "relation_name", matcher.compare_names(hit["relation_name"], voter_name)
+                    )
+                    and matcher.first_identity_anchor_matches(hit["relation_name"], voter_name)
+                    for other_row_id, voter_name in linked_people.get((unit, hit["roster_row_id"]), {}).items()
+                )
+            ]
+            if record["relation_hits"] and row_id not in direct_row_ids:
+                relation_units.setdefault(row_id, set()).add(unit)
+
+    for (unit, group_label), evidence_by_row in unit_evidence.items():
+        # Household members inherit the unit and roster status from an own-name match.
+        anchors_by_address: dict[str, list[dict[str, object]]] = {}
+        for row_id, record in list(evidence_by_row.items()):
+            voter = record["voter"]
+            if record["person_hits"]:
+                group_key = voter["same_address_group_key"]
+                if group_key:
+                    anchors_by_address.setdefault(group_key, []).append(record)
+            elif (
+                row_id in direct_row_ids
+                or not record["relation_hits"]
+                or relation_units.get(row_id) != {unit}
+            ):
+                del evidence_by_row[row_id]
+
+        for group_key, anchor_records in anchors_by_address.items():
+            group_rows = same_address_groups[group_key]
             for _, voter in group_rows.iterrows():
-                if int(voter["_row_id"]) in evidence_by_row:
+                row_id = int(voter["_row_id"])
+                if row_id in evidence_by_row or row_id in direct_row_ids:
                     continue
                 if unit not in matcher.voter_candidate_units(voter["candidate_units"]):
                     continue
-                hit_units = number_only_identity_units(voter, number_only_group_cache)
-                if hit_units and unit not in hit_units:
+                if relation_units.get(row_id, set()) - {unit}:
                     continue
                 member_link = same_address_word_link(voter, anchor_records)
                 if not member_link:
@@ -1430,40 +1436,7 @@ def build_apartment_voter_rows(
                     "same_address_word_linked_household_member",
                 )
 
-        explicit_rows = unit_rows[
-            unit_rows["identity_candidate_units"].map(lambda units: unit in matcher.voter_candidate_units(units))
-            & unit_rows["has_target_label"]
-        ]
-        for _, voter in explicit_rows.iterrows():
-            if int(voter["_row_id"]) not in evidence_by_row:
-                continue
-            add_explicit_apartment_address(evidence_by_row, voter)
-
-        all_person_hits: list[dict[str, object]] = []
-        all_relation_hits: list[dict[str, object]] = []
-        for record in evidence_by_row.values():
-            record["person_hits"] = matcher.dedupe_hits(
-                record["person_hits"],
-                ("voter_row_id", "roster_name_norm", "match_source", "match_kind", "match_detail"),
-            )
-            record["relation_hits"] = matcher.dedupe_hits(
-                record["relation_hits"],
-                ("voter_row_id", "roster_name_norm", "match_source", "match_kind", "match_detail"),
-            )
-            record["member_links"] = matcher.dedupe_hits(
-                record["member_links"],
-                ("voter_source", "voter_word", "anchor_serial", "anchor_source", "anchor_word", "match_kind"),
-            )
-            all_person_hits.extend(record["person_hits"])
-            all_relation_hits.extend(record["relation_hits"])
-            if record["person_hits"] or record["relation_hits"]:
-                identity_supported_row_ids.add(int(record["voter"]["_row_id"]))
-
-        has_explicit_address = any(
-            "explicit_apartment_address" in record["scopes"]
-            for record in evidence_by_row.values()
-        )
-        if not all_person_hits and not all_relation_hits and not has_explicit_address:
+        if not evidence_by_row:
             continue
 
         evidence_rows = sorted(
@@ -1476,30 +1449,25 @@ def build_apartment_voter_rows(
         )
         unit_values = unit_output_values(config, roster_rows, unit)
         for item in evidence_rows:
-            emitted_row_unit_keys.add((int(item["voter"]["_row_id"]), unit))
-            linked_items.append((unit_values, group_label, item))
-
-    # Direct matching comes first. A voter whose own name matched a roster person keeps only
-    # those links; relation-name and household-member links apply only to voters whose own
-    # name matched no one in the apartment.
-    directly_matched_row_ids = {
-        int(item["voter"]["_row_id"]) for _, _, item in linked_items if item["person_hits"]
-    }
-    for unit_values, group_label, item in linked_items:
-        voter = item["voter"]
-        candidates = connection_candidates(item)
-        if int(voter["_row_id"]) in directly_matched_row_ids:
-            if not item["person_hits"]:
-                continue
-            item = {**item, "relation_hits": [], "member_links": []}
-            candidates = [c for c in candidates if c[0] == CONNECTION_PRIORITY_VOTER_NAME]
-        record = base_output_record(voter, config)
-        record.update(unit_values)
-        record["apartment_status"] = group_label
-        set_connection_fields(record, candidates)
-        record["voter_link_type"] = voter_link_type(item)
-        record["_row_id"] = int(voter["_row_id"])
-        records.append(record)
+            voter = item["voter"]
+            row_id = int(voter["_row_id"])
+            emitted_row_unit_keys.add((row_id, unit))
+            if item["person_hits"] or item["relation_hits"]:
+                identity_supported_row_ids.add(row_id)
+            if voter["has_target_label"] and unit in matcher.voter_candidate_units(voter["identity_candidate_units"]):
+                item["scopes"].add("explicit_apartment_address")
+            candidates = connection_candidates(item)
+            if item["person_hits"]:
+                # Relation hits can distinguish roster people, while the voter retains only the own-name link.
+                item = {**item, "relation_hits": []}
+                candidates = [c for c in candidates if c[0] == CONNECTION_PRIORITY_VOTER_NAME]
+            record = base_output_record(voter, config)
+            record.update(unit_values)
+            record["apartment_status"] = group_label
+            set_connection_fields(record, candidates)
+            record["voter_link_type"] = voter_link_type(item)
+            record["_row_id"] = row_id
+            records.append(record)
 
     for unit in sorted(roster_rows["unit"].unique()):
         explicit_rows = usable[

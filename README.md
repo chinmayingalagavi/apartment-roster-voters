@@ -137,7 +137,7 @@ Important matching columns:
 | column | use |
 |---|---|
 | `name` | Voter name. Compared with roster names. |
-| `relation_name` | Relation name. Also compared with roster names. |
+| `relation_name` | Recorded relative's name. Compared with roster names and the names of voters already matched to the flat. |
 | `house_number` | Address text. Used to find apartment names and unit numbers. |
 | `part` | Voter-list part. Used to keep number-only address groups local. |
 
@@ -225,8 +225,8 @@ Columns come in this order: apartment details, the roster connection with its pa
 `apartment_connection` is chosen in this order:
 
 1. The roster person the voter's own name matched.
-2. Otherwise, the roster person the voter's relation name matched.
-3. Otherwise, for `same_address_household_member` rows, the roster person that the linked household member was connected through.
+2. Otherwise, the roster person identified by the voter's recorded relation, when that person also appears as a voter directly matched to the flat.
+3. Otherwise, for `same_address_household_member` rows, the roster person matched by the linked household voter's own name.
 
 If the voter's own name also matched the roster person their relation name matched, the voter's other name match is used when there is one. If several roster people tie at the same match %, all are listed, separated by semicolons. Spellings of one name that differ only in case, spacing, or punctuation are listed once.
 
@@ -237,9 +237,9 @@ Common `voter_link_type` values:
 | value | meaning |
 |---|---|
 | `voter_name_match` | The voter name matched a roster name. |
-| `relation_name_match` | The voter relation name matched a roster name. Used only when the voter's own name matched no one in the apartment. |
+| `relation_name_match` | The recorded relation matched a roster person and a different voter whose own name links that person to the same flat. Used when the voter's own name matched no one in the apartment. |
 | `explicit_apartment_address` | The voter address names the apartment. Without a name match, the row is linked to a unit only if the address points to exactly one unit; otherwise it is `Unmapped`. |
-| `same_address_household_member` | The row shares an address with another row that matched by name or relation. |
+| `same_address_household_member` | The row shares an address and a name link with a voter whose own name matched the roster at that flat. |
 
 Multiple link types are separated by semicolons.
 
@@ -291,7 +291,7 @@ The link-type counts are not mutually exclusive. A row can have more than one li
 
 ## Matching Summary
 
-The matcher uses the address to find possible apartment units. It then checks voter names against roster names. Two name words count as the same if they are identical, or both have at least 5 letters and are at least 90% similar. The whole-name rule also needs at least 90% similarity. The other rules need some words (or an initial) to agree, so the full-name `name_match_pct` can be well below 90. Relation names are checked only for voters whose own name matched no one in the apartment; a voter with a direct match keeps only their direct links.
+The matcher uses the address to find possible apartment units. It then checks voter names against roster names. Two name words count as the same if they are identical, or both have at least 5 letters and are at least 90% similar. The whole-name rule also needs at least 90% similarity. The other rules need some words (or an initial) to agree, so the full-name `name_match_pct` can be well below 90. A voter with an own-name match keeps their direct links. Relation and same-address household matches require a voter already linked to the same flat by their own name.
 
 Address-only rows are linked to a unit only when the address names the apartment and maps cleanly to one unit.
 
