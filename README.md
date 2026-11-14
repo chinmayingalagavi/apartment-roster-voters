@@ -18,8 +18,7 @@ Paths below are shown from this repository folder.
 | `matching.py` | Shared address and name matching logic. |
 | `apartments.example.csv` | Template for the apartment list CSV. |
 | `apartments.csv` | Local apartment list CSV that you create from the template. |
-| `data/` | Voter-list CSV input files. |
-| `standardized_rosters/` | Apartment roster CSV input files. |
+| `data/` | Voter-list CSV and source roster files. |
 | `outputs/` | Default output folder. |
 | `outputs/log/` | Timestamped run logs created when you run the script. |
 
@@ -31,15 +30,15 @@ Install Python dependencies with:
 python3 -m pip install -r requirements.txt
 ```
 
-`apartments.csv`, `data/`, `standardized_rosters/`, and `outputs/` are local working inputs and outputs. They are ignored by git.
+`apartments.csv`, `data/`, and `outputs/` are local working inputs and outputs. They are ignored by git.
 
 ## Inputs
 
-The matcher needs three kinds of CSV input:
+The matcher needs three kinds of input:
 
 1. One voter-list CSV.
 2. One apartment list CSV.
-3. One standardized roster CSV for each apartment.
+3. One source roster file for each apartment. The matcher prepares it in memory during the run.
 
 The default voter list is:
 
@@ -67,9 +66,9 @@ key,apartment_name,roster_path,keywords,extra_filler_terms
 
 | column | meaning |
 |---|---|
-| `key` | Short apartment key. This is the command-line key and should match `apartment_key` in the roster CSV. |
+| `key` | Short apartment key. Use it to select an apartment on the command line. |
 | `apartment_name` | Apartment name written to the output. |
-| `roster_path` | Path to the standardized roster CSV. Relative paths are read relative to the apartment list CSV. |
+| `roster_path` | Path to the source roster workbook or CSV. Relative paths are read relative to the apartment list CSV. |
 | `keywords` | Semicolon-separated phrases that identify this apartment in voter addresses. Use only the full apartment name and full-length misspellings of it. Do not add single words from the name, shortened forms, or anything that could name another place: a word like `classic` or `oasis` also matches other developments. |
 | `extra_filler_terms` | Optional semicolon-separated address words to ignore while parsing unit numbers. These terms do not identify the apartment by themselves. |
 
@@ -77,14 +76,16 @@ Example row:
 
 ```csv
 key,apartment_name,roster_path,keywords,extra_filler_terms
-sample_residency,Sample Residency,standardized_rosters/sample_residency.csv,sample residency;sampel residency,PHASE
+sample_residency,Sample Residency,data/sample_residency.xlsx,sample residency;sampel residency,PHASE
 ```
 
 Do not put another apartment's name in `keywords` or `extra_filler_terms`.
 
-## Roster CSV Format
+## Source roster formats
 
-Each roster CSV must have these columns:
+The matcher reads the original Excel files for `concorde`, `purnima`, and `silicon_oasis`, and the original CSV for `tirumala_vintage`. Use these apartment keys to select the corresponding source format.
+
+For other apartments, use a CSV or Excel file with the columns below. Include `name` and at least one of `unit` or `unit_part`. The remaining fields can be blank or omitted. Existing roster CSVs in this format also work.
 
 ```text
 apartment_key,unit,block,unit_part,name,status
@@ -207,9 +208,9 @@ Each workbook has two sheets:
 | sheet | contents |
 |---|---|
 | `voters` | The voter-list rows linked to the apartment, described below. |
-| `roster_not_matched` | The roster rows that no voter row is connected through, exactly as they appear in the roster CSV and in roster order. |
+| `roster_not_matched` | The roster rows that no voter row is connected through, in roster order and in the roster format used for matching. |
 
-Together, the roster people named in `apartment_connection` on the `voters` sheet and the rows on the `roster_not_matched` sheet cover the whole roster. A roster person counts as matched only when a voter row in their own unit names them in `apartment_connection`. A roster person whose household was found through someone else, or only through an address, is still listed on `roster_not_matched`.
+Together, the roster people named in `apartment_connection` on the `voters` sheet and the rows on the `roster_not_matched` sheet cover the prepared roster. A roster person counts as matched only when a voter row in their own unit names them in `apartment_connection`. A roster person whose household was found through someone else, or only through an address, is still listed on `roster_not_matched`.
 
 ### `voters` sheet
 
@@ -274,6 +275,7 @@ Then it records run metadata and one summary per apartment:
 |---|---|
 | `voter_csv` | Voter-list CSV used for the run. |
 | `apartments_csv` | Apartment list CSV used for the run. |
+| `roster_source` | Original workbook or CSV read for the apartment. |
 | `output_xlsx` | Output workbook written for the apartment. |
 | `roster_rows` | Number of person rows in the apartment roster. |
 | `roster_households` | Number of unique roster units. |

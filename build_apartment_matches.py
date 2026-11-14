@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # AUTHOR: Chinmay and AI
-"""Build an Excel workbook per apartment from a voter-list CSV and a standardized roster CSV.
+"""Build an Excel workbook per apartment from a voter-list CSV and a source roster in Excel or CSV.
 
-Sheet 1 (voters) lists the voter-list rows linked to the apartment. Sheet 2 (roster_not_matched)
-lists the roster rows that no voter row is connected through, as they appear in the roster CSV.
+Read apartment settings from apartments.csv and standardize source rosters in memory.
+Sheet 1 (voters) lists linked voter rows. Sheet 2 (roster_not_matched) lists roster rows
+that no voter row is connected through, in roster order.
 """
 
 from __future__ import annotations
@@ -128,6 +129,13 @@ STANDARD_ROSTER_COLUMNS = [
     "name",
     "status",
 ]
+
+# Source workbook columns used by the original roster converters.
+EXCEL_ROSTER_COLUMNS = {
+    "concorde": {"House #": "unit_part", "Block": "block", "Name": "name", "Residency": "status"},
+    "purnima": {"Flat #": "unit", "Name": "name", "Status": "status"},
+    "silicon_oasis": {"Flat No.": "unit", "Name": "name", "Status": "status"},
+}
 
 APARTMENT_CONFIG_REQUIRED_COLUMNS = [
     "key",
@@ -649,9 +657,59 @@ def roster_by_unit_group(roster_rows: pd.DataFrame) -> dict[tuple[str, str], lis
     return out
 
 
-def load_roster(config: ApartmentConfig) -> pd.DataFrame:
-    raw = pd.read_csv(config.roster_path, dtype=str, keep_default_na=False)
-    roster = raw.copy()
+def read_roster_source(config: ApartmentConfig) -> pd.DataFrame:
+    """Read the source file and apply the apartment's source-specific cleaning."""
+    path = config.roster_path
+    if path.suffix.lower() in {".xlsx", ".xlsm"}:
+        source = pd.read_excel(path, dtype=str)
+        if "name" in source and {"unit", "unit_part"}.intersection(source.columns):
+            return source.fillna("")
+
+        columns = EXCEL_ROSTER_COLUMNS.get(config.key, {})
+        if not columns or not set(columns).issubset(source.columns):
+            expected = ", ".join(columns) if columns else "name and either unit or unit_part"
+            raise ValueError(f"{path} is missing expected roster columns: {expected}")
+
+        roster = source.dropna(subset=list(columns)).rename(columns=columns)
+        roster = roster[list(columns.values())].copy()
+        status = roster["status"].map(matcher.normalize_space)
+        if config.key == "concorde":
+            roster["status"] = status.str.lower().eq("yes").map({True: "Yes", False: "No"})
+        else:
+            roster["status"] = status.str.title()
+        if config.key == "purnima":
+            names = roster["name"].map(matcher.normalize_space).str.lower()
+            unknown = names.eq("") | names.str.contains(r"<<<|not known")
+            roster = roster.loc[~unknown].copy()
+    else:
+        try:
+            roster = pd.read_csv(path, dtype=str, keep_default_na=False)
+        except UnicodeDecodeError:
+            if config.key != "tirumala_vintage":
+                raise
+            roster = pd.read_csv(path, dtype=str, keep_default_na=False, encoding="cp1252")
+
+        tirumala_source_columns = {"unit", "block", "name", "status"}
+        if (
+            config.key != "tirumala_vintage"
+            or "apartment_key" in roster
+            or "unit_part" in roster
+            or not tirumala_source_columns.issubset(roster.columns)
+        ):
+            return roster
+
+        # The Tirumala source contains a placeholder email and truncated names.
+        roster["name"] = roster["name"].str.replace("…", "", regex=False).str.strip()
+        roster = roster.loc[~roster["name"].str.contains("@", regex=False)].copy()
+        for column in ("unit", "block", "status"):
+            roster[column] = roster[column].str.strip()
+
+    roster["apartment_key"] = config.key
+    return roster.reindex(columns=STANDARD_ROSTER_COLUMNS, fill_value="")
+
+
+def normalize_roster(config: ApartmentConfig, source_rows: pd.DataFrame) -> pd.DataFrame:
+    roster = source_rows.copy()
 
     for column in STANDARD_ROSTER_COLUMNS:
         if column not in roster.columns:
@@ -1069,18 +1127,6 @@ def number_only_identity_units(
     if not cached:
         return set()
     return set(cached["row_identity_hit_units"].get(int(voter["_row_id"]), []))
-
-
-def load_data(
-    voter_csv: Path,
-    config: ApartmentConfig,
-) -> tuple[pd.DataFrame, pd.DataFrame, dict[tuple[str, str], list[dict[str, object]]]]:
-    voters = pd.read_csv(voter_csv).copy()
-    voters["_row_id"] = range(len(voters))
-    roster_rows = load_roster(config)
-    voters = build_address_fields(voters, roster_rows, config)
-    voters = matcher.assign_households(voters)
-    return voters, roster_rows, roster_by_unit_group(roster_rows)
 
 
 def unit_output_values(config: ApartmentConfig, roster_rows: pd.DataFrame, unit: str) -> dict[str, object]:
@@ -1506,23 +1552,22 @@ def other_households_matched_at_booth(out: pd.DataFrame) -> pd.Series:
 
 
 def roster_rows_not_matched(
-    config: ApartmentConfig,
+    source_rows: pd.DataFrame,
     roster_rows: pd.DataFrame,
     connected: set[tuple[str, str]],
 ) -> pd.DataFrame:
-    """Roster CSV rows that no output voter row is connected through, unchanged and in roster order.
+    """Return roster rows that no output voter row is connected through, in roster order.
 
     A roster person is matched when an output row in their unit names them in apartment_connection.
     Rows the matcher cannot use (blank name or no unit) are never matched, so they are listed too.
     """
-    raw = pd.read_csv(config.roster_path, dtype=str, keep_default_na=False)
     is_connected = [
         (str(unit), connection_name_key(name)) in connected
         for unit, name in zip(roster_rows["unit"], roster_rows["name"])
     ]
-    # load_roster keeps the roster CSV's row index, so it points back to the raw rows.
+    # Normalization keeps the source row index through filtering.
     matched_index = roster_rows.index[is_connected]
-    return raw[~raw.index.isin(matched_index)].reset_index(drop=True)
+    return source_rows[~source_rows.index.isin(matched_index)].reset_index(drop=True)
 
 
 def excel_ready(frame: pd.DataFrame) -> pd.DataFrame:
@@ -1559,15 +1604,20 @@ def write_output_workbook(destination: Path, voter_rows: pd.DataFrame, roster_no
 def run_one(
     config: ApartmentConfig,
     voter_csv: Path,
-    output_xlsx: Path | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Match one apartment, write its workbook, and return the voter rows and the roster rows not matched."""
-    voters, roster_rows, roster = load_data(voter_csv, config)
+    output_xlsx: Path,
+) -> dict[str, object]:
+    """Read the roster once, write the apartment workbook, and return its run summary."""
+    source_rows = read_roster_source(config)
+    roster_rows = normalize_roster(config, source_rows)
+    roster = roster_by_unit_group(roster_rows)
+    voters = pd.read_csv(voter_csv)
+    voters["_row_id"] = range(len(voters))
+    voters = build_address_fields(voters, roster_rows, config)
+    voters = matcher.assign_households(voters)
     out, connected = build_apartment_voter_rows(voters, roster_rows, roster, config)
-    not_matched = roster_rows_not_matched(config, roster_rows, connected)
-    destination = output_xlsx or default_output_xlsx(config)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    write_output_workbook(destination, out, not_matched)
+    not_matched = roster_rows_not_matched(source_rows, roster_rows, connected)
+    output_xlsx.parent.mkdir(parents=True, exist_ok=True)
+    write_output_workbook(output_xlsx, out, not_matched)
     print(f"{config.key}: rows: {len(out)}")
     if not out.empty:
         print(out["apartment_status"].value_counts().to_string())
@@ -1580,12 +1630,8 @@ def run_one(
             f"{int(out['voter_link_type'].str.contains('explicit_apartment_address', regex=False).sum())}"
         )
     print(f"roster_rows_not_matched: {len(not_matched)}")
-    print(f"output_xlsx: {destination}")
-    return out, not_matched
-
-
-def default_output_xlsx(config: ApartmentConfig) -> Path:
-    return PROJECT_ROOT / "outputs" / f"{config.key}_voters.xlsx"
+    print(f"output_xlsx: {output_xlsx}")
+    return apartment_run_summary(config, roster_rows, out, not_matched, output_xlsx)
 
 
 def household_count(rows: pd.DataFrame) -> int:
@@ -1635,7 +1681,7 @@ def apartment_run_summary(
     return {
         "apartment_key": config.key,
         "apartment_name": config.apartment_name,
-        "roster_csv": path_for_log(config.roster_path),
+        "roster_source": path_for_log(config.roster_path),
         "output_xlsx": path_for_log(output_xlsx),
         "roster_rows": int(len(roster_rows)),
         "roster_households": int(roster_rows["unit"].nunique()),
@@ -1704,48 +1750,18 @@ def main() -> None:
         available = ", ".join(sorted(configs))
         raise SystemExit(f"Unknown apartment key: {args.apartment}. Available keys: {available}")
 
-    if args.apartment == "all":
-        if args.output_xlsx:
-            raise SystemExit("--output-xlsx can only be used with one apartment")
-        output_root = args.output_dir or PROJECT_ROOT / "outputs"
-        output_root.mkdir(parents=True, exist_ok=True)
-        summaries: list[dict[str, object]] = []
-        for config in configs.values():
-            output_xlsx = output_root / f"{config.key}_voters.xlsx"
-            out, not_matched = run_one(config, args.voter_csv, output_xlsx)
-            roster_rows = load_roster(config)
-            summaries.append(apartment_run_summary(config, roster_rows, out, not_matched, output_xlsx))
-        log_path = write_run_log(output_root, args.voter_csv, args.apartments_csv, summaries)
-        print(f"run_log: {log_path}")
-        return
+    if args.apartment == "all" and args.output_xlsx:
+        raise SystemExit("--output-xlsx can only be used with one apartment")
+    if args.output_dir and args.output_xlsx:
+        raise SystemExit("--output-dir and --output-xlsx cannot be used together")
 
-    if args.output_dir:
-        if args.output_xlsx:
-            raise SystemExit("--output-dir and --output-xlsx cannot be used together")
-        config = configs[args.apartment]
-        args.output_dir.mkdir(parents=True, exist_ok=True)
-        output_xlsx = args.output_dir / f"{config.key}_voters.xlsx"
-        out, not_matched = run_one(config, args.voter_csv, output_xlsx)
-        roster_rows = load_roster(config)
-        log_path = write_run_log(
-            args.output_dir,
-            args.voter_csv,
-            args.apartments_csv,
-            [apartment_run_summary(config, roster_rows, out, not_matched, output_xlsx)],
-        )
-        print(f"run_log: {log_path}")
-        return
-
-    config = configs[args.apartment]
-    out, not_matched = run_one(config, args.voter_csv, args.output_xlsx)
-    output_xlsx = args.output_xlsx or default_output_xlsx(config)
-    roster_rows = load_roster(config)
-    log_path = write_run_log(
-        PROJECT_ROOT / "outputs",
-        args.voter_csv,
-        args.apartments_csv,
-        [apartment_run_summary(config, roster_rows, out, not_matched, output_xlsx)],
-    )
+    output_root = args.output_dir or PROJECT_ROOT / "outputs"
+    selected = configs.values() if args.apartment == "all" else (configs[args.apartment],)
+    summaries = [
+        run_one(config, args.voter_csv, args.output_xlsx or output_root / f"{config.key}_voters.xlsx")
+        for config in selected
+    ]
+    log_path = write_run_log(output_root, args.voter_csv, args.apartments_csv, summaries)
     print(f"run_log: {log_path}")
 
 
