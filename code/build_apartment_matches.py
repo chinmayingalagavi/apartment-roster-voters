@@ -15,12 +15,13 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from itertools import cycle, groupby
 from pathlib import Path
 from textwrap import wrap
 from typing import Iterable
 
 import pandas as pd
-from openpyxl.styles import Alignment
+from openpyxl.styles import Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 
 import matching as matcher
@@ -1597,8 +1598,22 @@ def excel_ready(frame: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
+def shade_households(sheet) -> None:
+    """Alternate light fills across the rows of each apartment unit."""
+    fills = cycle(
+        PatternFill(fill_type="solid", fgColor=color)
+        for color in ("FFF2F7FC", "FFFAF6EE")
+    )
+    unit_column = next(cell.column - 1 for cell in sheet[1] if cell.value == "apartment_unit")
+    households = groupby(sheet.iter_rows(min_row=2), key=lambda row: row[unit_column].value)
+    for (_, rows), fill in zip(households, fills):
+        for row in rows:
+            for cell in row:
+                cell.fill = fill
+
+
 def format_sheet(sheet, frame: pd.DataFrame) -> None:
-    """Keep text that starts with '=' as text, freeze the header row, add filters, and size columns."""
+    """Keep literal text, add filters and column widths, and shade mapped households."""
     for row in sheet.iter_rows(min_row=2):
         for cell in row:
             if cell.data_type == "f":
@@ -1619,6 +1634,8 @@ def format_sheet(sheet, frame: pd.DataFrame) -> None:
                     row = sheet.row_dimensions[cell.row]
                     row.height = max(row.height or 15, 15 * len(lines))
         sheet.column_dimensions[letter].width = width
+    if sheet.title == VOTERS_SHEET:
+        shade_households(sheet)
 
 
 def write_output_workbook(

@@ -203,7 +203,7 @@ Together, the roster people named in `apartment_connection` on `voters_mapped_to
 
 ### `voters_mapped_tohouse` sheet
 
-Each row is one voter-list row linked to one apartment unit. Rows are sorted by apartment unit, then status, then voter-list order, so each household's voters sit together.
+Each row is one voter-list row linked to one apartment unit. Rows are sorted by apartment unit, then status, then voter-list order. Each unit's rows share a light fill that alternates between consecutive units.
 
 Columns come in this order: apartment details, the roster connection with its part-name and full-name match %, the count of other households matched at the same booth, the link type, the voter-list name and relation, then the other voter-list columns.
 
