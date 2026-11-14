@@ -2,7 +2,7 @@
 # AUTHOR: Chinmay and AI
 """Build an Excel workbook per apartment from a voter-list CSV and a source roster in Excel or CSV.
 
-Read apartment settings from apartments.csv and standardize source rosters in memory.
+Read apartment settings from data/apartments.csv and standardize source rosters in memory.
 Sheet 1 (voters) lists linked voter rows. Sheet 2 (roster_not_matched) lists roster rows
 that no voter row is connected through, in roster order.
 """
@@ -23,8 +23,8 @@ from openpyxl.utils import get_column_letter
 import matching as matcher
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_APARTMENTS_CSV = PROJECT_ROOT / "apartments.csv"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_APARTMENTS_CSV = PROJECT_ROOT / "data" / "apartments.csv"
 DEFAULT_VOTER_CSV = PROJECT_ROOT / "data" / "voters.csv"
 UNIT_PAD_WIDTH = 3
 
@@ -1755,7 +1755,7 @@ def main() -> None:
     if args.output_dir and args.output_xlsx:
         raise SystemExit("--output-dir and --output-xlsx cannot be used together")
 
-    output_root = args.output_dir or PROJECT_ROOT / "outputs"
+    output_root = args.output_dir or PROJECT_ROOT / "output"
     selected = configs.values() if args.apartment == "all" else (configs[args.apartment],)
     summaries = [
         run_one(config, args.voter_csv, args.output_xlsx or output_root / f"{config.key}_voters.xlsx")

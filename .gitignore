@@ -1,8 +1,6 @@
 # Local inputs and generated outputs
-apartments.csv
-data/
-standardized_rosters/
-outputs/
+/data/
+/output/
 
 # Python artifacts
 __pycache__/

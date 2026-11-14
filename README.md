@@ -3,10 +3,10 @@
 This folder contains a standalone matcher for linking apartment rosters to voter-list rows.
 
 ```sh
-python3 build_apartment_matches.py
+python3 code/build_apartment_matches.py
 ```
 
-This runs every apartment listed in `apartments.csv`.
+This runs every apartment listed in `data/apartments.csv` using the default voter list.
 
 Paths below are shown from this repository folder.
 
@@ -14,23 +14,19 @@ Paths below are shown from this repository folder.
 
 | path | purpose |
 |---|---|
-| `build_apartment_matches.py` | Main script. Run this file. |
-| `matching.py` | Shared address and name matching logic. |
-| `apartments.example.csv` | Template for the apartment list CSV. |
-| `apartments.csv` | Local apartment list CSV that you create from the template. |
-| `data/` | Voter-list CSV and source roster files. |
-| `outputs/` | Default output folder. |
-| `outputs/log/` | Timestamped run logs created when you run the script. |
+| `code/` | Matcher, dependencies, and the apartment list template. |
+| `data/` | Local apartment list, voter lists, and original rosters. |
+| `output/` | Generated workbooks and timestamped run logs. |
 
 The script needs Python 3, `pandas`, and `openpyxl` (for the Excel output).
 
 Install Python dependencies with:
 
 ```sh
-python3 -m pip install -r requirements.txt
+python3 -m pip install -r code/requirements.txt
 ```
 
-`apartments.csv`, `data/`, and `outputs/` are local working inputs and outputs. They are ignored by git.
+`data/` and `output/` are ignored by Git.
 
 ## Inputs
 
@@ -49,10 +45,10 @@ data/voters.csv
 The default apartment list is:
 
 ```text
-apartments.csv
+data/apartments.csv
 ```
 
-Create it by using `apartments.example.csv` as a template.
+Create it from `code/apartments.example.csv`. The sample roster path assumes the roster is alongside the apartment list in `data/`.
 
 ## Apartment List CSV Format
 
@@ -76,7 +72,7 @@ Example row:
 
 ```csv
 key,apartment_name,roster_path,keywords,extra_filler_terms
-sample_residency,Sample Residency,data/sample_residency.xlsx,sample residency;sampel residency,PHASE
+sample_residency,Sample Residency,sample_residency.xlsx,sample residency;sampel residency,PHASE
 ```
 
 Do not put another apartment's name in `keywords` or `extra_filler_terms`.
@@ -149,59 +145,51 @@ The other columns are copied into the output.
 
 ## Run
 
-Run all apartments listed in `apartments.csv`:
+Run all apartments with the default voter list:
 
 ```sh
-python3 build_apartment_matches.py
+python3 code/build_apartment_matches.py
 ```
 
-That is the same as:
+Run all apartments with the prepared constituency voter list:
 
 ```sh
-python3 build_apartment_matches.py all
-```
-
-Run all apartments and force a shared output folder:
-
-```sh
-python3 build_apartment_matches.py all --output-dir outputs
+python3 code/build_apartment_matches.py all --voter-csv data/ac_voters.csv --output-dir output/ac
 ```
 
 Run one apartment:
 
 ```sh
-python3 build_apartment_matches.py <apartment_key> --output-dir outputs
+python3 code/build_apartment_matches.py <apartment_key>
 ```
 
 Run one apartment and choose the exact output file:
 
 ```sh
-python3 build_apartment_matches.py <apartment_key> --output-xlsx outputs/check.xlsx
+python3 code/build_apartment_matches.py <apartment_key> --output-xlsx output/check.xlsx
 ```
 
 Run with a different apartment list:
 
 ```sh
-python3 build_apartment_matches.py all --apartments-csv path/to/apartments.csv --output-dir outputs
+python3 code/build_apartment_matches.py all --apartments-csv path/to/apartments.csv
 ```
 
 Run with a different voter list:
 
 ```sh
-python3 build_apartment_matches.py all --voter-csv path/to/voters.csv --output-dir outputs
+python3 code/build_apartment_matches.py all --voter-csv path/to/voters.csv
 ```
 
-The apartment argument is optional. If omitted, it defaults to `all`. If provided, it must be `all` or one apartment key from `apartments.csv`.
+The apartment argument defaults to `all`. Use an apartment key from the apartment list to run just that apartment. Use `--output-dir` to change where the workbooks and log are written.
 
 ## Outputs
 
-Each apartment gets one Excel workbook. With `--output-dir outputs`, workbooks are named:
+Each apartment gets one Excel workbook. The default path is:
 
 ```text
-outputs/{apartment_key}_voters.xlsx
+output/{apartment_key}_voters.xlsx
 ```
-
-Without `--output-dir`, workbooks are also written as `outputs/{apartment_key}_voters.xlsx`.
 
 Each workbook has two sheets:
 
@@ -259,7 +247,7 @@ Multiple link types are separated by semicolons.
 Every run writes a timestamped JSON log:
 
 ```text
-outputs/log/run_YYYYMMDD_HHMMSS.json
+output/log/run_YYYYMMDD_HHMMSS.json
 ```
 
 The log starts with these column lists, in this order:
@@ -305,6 +293,6 @@ If an address points to multiple possible units, name or relation evidence can c
 After editing the code, run:
 
 ```sh
-python3 -m py_compile build_apartment_matches.py matching.py
-python3 build_apartment_matches.py
+python3 -m py_compile code/build_apartment_matches.py code/matching.py
+python3 code/build_apartment_matches.py
 ```
