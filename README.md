@@ -207,13 +207,15 @@ Each row is one voter-list row linked to one apartment unit. Rows are sorted by 
 
 Strong matches meet any of these conditions:
 
-- `name_match_pct` is 100 and the voter name has at least two full words.
-- `name_match_pct` is above 95, the voter name has at least two full words, and `other_hh_matched_booth` is at least 1.
+- `name_match_pct` is 100 and the voter-roll name used for that score has at least two full words.
+- `name_match_pct` is above 95, that same name has at least two full words, and `other_hh_matched_booth` is at least 1.
 - `name_match_pct` is above 80 and `other_hh_matched_booth` is at least 3.
 - Two linked people on the voter roll each match a different roster person in the unit. The strong shade also applies to their mapped household group.
 - The voter address contains the configured apartment name after normalizing case, punctuation, and spacing.
 
 Among the remaining rows, a match is probable when `name_match_pct` is 100, or when it is above 75 and `other_hh_matched_booth` is at least 3. All other mapped rows need review.
+
+The word count uses the voter's own name for direct matches, the recorded relative's name for relation matches, and the linked voter's name for household-member matches. Initials do not count as full words.
 
 Columns come in this order: apartment details, the roster connection with its part-name and full-name match %, the count of other households matched at the same booth, the link type, the voter-list name and relation, then the other voter-list columns.
 

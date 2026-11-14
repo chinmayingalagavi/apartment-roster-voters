@@ -9,6 +9,7 @@ Relation and household links require a voter directly matched to the same flat.
 Two people linked on the voter roll can corroborate each other's roster matches.
 Rank competing voter records for each roster person by name score and booth support.
 Shade mapped rows by match confidence in alternating blue and yellow flats.
+Use the name that produced the similarity score for the confidence word count.
 """
 
 from __future__ import annotations
@@ -908,8 +909,12 @@ def percent(score: float | None) -> int | None:
     return None if score is None else round(100 * score)
 
 
-# (priority, full-name match %, part-name match %, roster name)
-ConnectionCandidate = tuple[int, int | None, int | None, str]
+# (priority, full-name match %, part-name match %, roster name, multiple full words in scored name)
+ConnectionCandidate = tuple[int, int | None, int | None, str, bool]
+
+
+def has_multiple_name_words(name: object) -> bool:
+    return len(matcher.full_word_tokens(matcher.tokenize_name(name))) > 1
 
 
 def connection_candidates(record: dict[str, object]) -> list[ConnectionCandidate]:
@@ -929,6 +934,7 @@ def connection_candidates(record: dict[str, object]) -> list[ConnectionCandidate
                 matcher.name_match_percent(hit["voter_name"], hit["roster_name"]),
                 percent(hit.get("part_score")),
                 str(hit["roster_name"]),
+                has_multiple_name_words(hit["voter_name"]),
             )
         )
     for hit in record["relation_hits"]:
@@ -938,10 +944,11 @@ def connection_candidates(record: dict[str, object]) -> list[ConnectionCandidate
                 matcher.name_match_percent(hit["relation_name"], hit["roster_name"]),
                 percent(hit.get("part_score")),
                 str(hit["roster_name"]),
+                has_multiple_name_words(hit["relation_name"]),
             )
         )
     for link in record["member_links"]:
-        # A household member inherits the connection and match % of the voter they are linked through.
+        # Keep the score and word count from the same voter.
         for roster_name in link.get("anchor_connection_names", []):
             candidates.append(
                 (
@@ -949,46 +956,50 @@ def connection_candidates(record: dict[str, object]) -> list[ConnectionCandidate
                     link.get("anchor_connection_pct"),
                     link.get("anchor_connection_part_pct"),
                     str(roster_name),
+                    link["anchor_match_has_multiple_words"],
                 )
             )
     return candidates
 
 
-def select_connection(candidates: list[ConnectionCandidate]) -> tuple[list[str], int | None, int | None]:
+def select_connection(candidates: list[ConnectionCandidate]) -> tuple[list[str], int | None, int | None, bool]:
     """Pick the roster person(s) a row is connected through, with the full-name and part-name match %.
 
     The voter's own name match wins over a relation-name match, which wins over a
     household-member link. Within that, the highest full-name match % wins; equal scores are
-    all kept. Household-member links carry the match % of the voter they are linked through.
+    all kept. The word-count flag comes from the selected match evidence.
     """
     if not candidates:
-        return [], None, None
+        return [], None, None, False
     best_priority = min(candidate[0] for candidate in candidates)
     top = [candidate for candidate in candidates if candidate[0] == best_priority]
-    scores = [pct for _, pct, _, _ in top if pct is not None]
+    scores = [pct for _, pct, _, _, _ in top if pct is not None]
     best_pct = max(scores) if scores else None
     names: list[str] = []
     part_pcts: list[int] = []
+    has_multiple_words = False
     seen_keys: set[str] = set()
-    for _, pct, part_pct, roster_name in top:
+    for _, pct, part_pct, roster_name, multiple_words in top:
         if pct != best_pct:
             continue
         if part_pct is not None:
             part_pcts.append(part_pct)
+        has_multiple_words |= multiple_words
         key = connection_name_key(roster_name)
         if key not in seen_keys:
             seen_keys.add(key)
             names.append(roster_name)
-    return names, best_pct, (max(part_pcts) if part_pcts else None)
+    return names, best_pct, (max(part_pcts) if part_pcts else None), has_multiple_words
 
 
 def anchor_connection(anchor_record: dict[str, object]) -> dict[str, object]:
     """The roster connection and match % of the voter a household member is linked through."""
-    names, pct, part_pct = select_connection(connection_candidates(anchor_record))
+    names, pct, part_pct, has_multiple_words = select_connection(connection_candidates(anchor_record))
     return {
         "anchor_connection_names": names,
         "anchor_connection_pct": pct,
         "anchor_connection_part_pct": part_pct,
+        "anchor_match_has_multiple_words": has_multiple_words,
     }
 
 
@@ -1229,12 +1240,13 @@ def base_output_record(voter: pd.Series, config: ApartmentConfig) -> dict[str, o
 
 
 def set_connection_fields(record: dict[str, object], candidates: list[ConnectionCandidate]) -> None:
-    names, pct, part_pct = select_connection(candidates)
+    names, pct, part_pct, has_multiple_words = select_connection(candidates)
     record["apartment_connection"] = "; ".join(names)
     record["part_name_match"] = part_pct
     record["name_match_pct"] = pct
     record["_connection_candidates"] = candidates
     record["_connection_names"] = names
+    record["_match_has_multiple_words"] = has_multiple_words
 
 
 def collapse_unresolved_group_records(out: pd.DataFrame) -> pd.DataFrame:
@@ -1359,9 +1371,7 @@ def match_confidence(out: pd.DataFrame, voters: pd.DataFrame, apartment_name: st
     ]
     scores = out["name_match_pct"].fillna(0)
     booth_counts = out["other_hh_matched_booth"]
-    multiple_words = out["voter_name"].map(
-        lambda name: len(matcher.full_word_tokens(matcher.tokenize_name(name))) > 1
-    )
+    multiple_words = out["_match_has_multiple_words"]
     strong = (
         (scores.eq(100) & multiple_words)
         | (scores.gt(95) & multiple_words & booth_counts.ge(1))
