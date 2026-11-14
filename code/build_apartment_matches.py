@@ -8,6 +8,7 @@ apartment without a unit link, and roster rows that no voter row is connected th
 Relation and household links require a voter directly matched to the same flat.
 Two people linked on the voter roll can corroborate each other's roster matches.
 Rank competing voter records for each roster person by name score and booth support.
+Shade mapped rows by match confidence in alternating blue and yellow flats.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from copy import copy
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import combinations, cycle, groupby
@@ -90,6 +92,10 @@ UNMAPPED_HOUSEHOLD_COLUMNS = [
     "voter_serial_numbers",
 ]
 MAX_EXCEL_COLUMN_WIDTH = 50
+CONFIDENCE_COLORS = (
+    {"Strong": "FF1D527E", "Probable": "FF8FB9DD", "Needs review": "FFEAF2FC"},
+    {"Strong": "FF806000", "Probable": "FFE8C35B", "Needs review": "FFFFF6D7"},
+)
 
 # Status for voters whose address names the apartment but maps to no single unit.
 UNMAPPED_STATUS = "Unmapped"
@@ -1121,6 +1127,15 @@ def direct_hit_units(
     return units
 
 
+def same_roll_household(first: pd.Series, second: pd.Series) -> bool:
+    """Check the household group and address assigned from the voter roll."""
+    return (
+        first["household_id"] is not None
+        and first["household_id"] == second["household_id"]
+        and first["address_norm"] == second["address_norm"]
+    )
+
+
 def corroborated_roster_matches(
     unit_evidence: dict[tuple[str, str], dict[int, dict[str, object]]],
 ) -> dict[int, tuple[str, str]]:
@@ -1141,11 +1156,7 @@ def corroborated_roster_matches(
     pairs: set[tuple[int, str, int, str, str]] = set()
     for unit, matches in by_unit.items():
         for (first_id, (first, first_names)), (second_id, (second, second_names)) in combinations(matches.items(), 2):
-            same_address = (
-                first["household_id"] is not None
-                and first["household_id"] == second["household_id"]
-                and first["address_norm"] == second["address_norm"]
-            )
+            same_address = same_roll_household(first, second)
             named_relation = (
                 matcher.relation_identifies_voter(first["relation_name"], second["name"])
                 or matcher.relation_identifies_voter(second["relation_name"], first["name"])
@@ -1308,6 +1319,60 @@ def dominated_voter_links(out: pd.DataFrame) -> dict[tuple[int, str], set[str]]:
             if dominators >= 2:
                 discarded.setdefault((row_id, unit), set()).add(name)
     return discarded
+
+
+def match_confidence(out: pd.DataFrame, voters: pd.DataFrame, apartment_name: str) -> pd.Series:
+    """Classify final mapped rows without changing which voters are linked."""
+    source = voters.set_index("_row_id")
+    multiple_matches: set[tuple[str, int]] = set()
+    named = out.loc[out["voter_link_type"].str.split(";").map(lambda kinds: "voter_name_match" in kinds)]
+    for unit, rows in named.groupby("apartment_unit", sort=False):
+        # A household must have two distinct direct matches to two distinct roster people.
+        for first, second in combinations(rows.to_dict("records"), 2):
+            first_id, second_id = first["_row_id"], second["_row_id"]
+            if first_id == second_id:
+                continue
+            first_names = {connection_name_key(name) for name in first["_connection_names"]}
+            second_names = {connection_name_key(name) for name in second["_connection_names"]}
+            if len(first_names | second_names) < 2:
+                continue
+            first_voter, second_voter = source.loc[first_id], source.loc[second_id]
+            if (
+                same_roll_household(first_voter, second_voter)
+                or matcher.relation_identifies_voter(first["relation_name"], second["voter_name"])
+                or matcher.relation_identifies_voter(second["relation_name"], first["voter_name"])
+            ):
+                multiple_matches.update(((unit, first_id), (unit, second_id)))
+
+    # Carry corroboration to other mapped people in the same roll household.
+    household_keys = {
+        (unit, source.at[row_id, "household_id"], source.at[row_id, "address_norm"])
+        for unit, row_id in multiple_matches
+        if source.at[row_id, "household_id"] is not None
+    }
+    apartment_pattern = rf"\b{re.escape(matcher.normalize_address(apartment_name))}\b"
+    exact_apartment = out["house_number"].map(matcher.normalize_address).str.contains(apartment_pattern)
+    corroborated = [
+        (unit, row_id) in multiple_matches
+        or (unit, source.at[row_id, "household_id"], source.at[row_id, "address_norm"]) in household_keys
+        for unit, row_id in zip(out["apartment_unit"], out["_row_id"])
+    ]
+    scores = out["name_match_pct"].fillna(0)
+    booth_counts = out["other_hh_matched_booth"]
+    multiple_words = out["voter_name"].map(
+        lambda name: len(matcher.full_word_tokens(matcher.tokenize_name(name))) > 1
+    )
+    strong = (
+        (scores.eq(100) & multiple_words)
+        | (scores.gt(95) & multiple_words & booth_counts.ge(1))
+        | (scores.gt(80) & booth_counts.ge(3))
+        | exact_apartment
+        | pd.Series(corroborated, index=out.index, dtype=bool)
+    )
+    confidence = pd.Series("Needs review", index=out.index)
+    confidence.loc[scores.gt(75) & booth_counts.ge(3)] = "Probable"
+    confidence.loc[strong] = "Strong"
+    return confidence
 
 
 def build_apartment_voter_rows(
@@ -1492,7 +1557,7 @@ def build_apartment_voter_rows(
     connected: set[tuple[str, str]] = set()
     if out.empty:
         return (
-            pd.DataFrame(columns=OUTPUT_COLUMNS),
+            pd.DataFrame(columns=[*OUTPUT_COLUMNS, "_match_confidence"]),
             connected,
             pd.DataFrame(columns=UNMAPPED_HOUSEHOLD_COLUMNS),
         )
@@ -1513,7 +1578,8 @@ def build_apartment_voter_rows(
     out = out.sort_values(sort_cols).reset_index(drop=True)
     out["part_name_match"] = out["part_name_match"].astype("Int64")
     out["name_match_pct"] = out["name_match_pct"].astype("Int64")
-    return out[OUTPUT_COLUMNS], connected, unmapped_households
+    out["_match_confidence"] = match_confidence(out, voters, config.apartment_name)
+    return out[[*OUTPUT_COLUMNS, "_match_confidence"]], connected, unmapped_households
 
 
 def resolve_voter_links(
@@ -1771,18 +1837,24 @@ def excel_ready(frame: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
-def shade_households(sheet) -> None:
-    """Alternate light fills across the rows of each apartment unit."""
-    fills = cycle(
-        PatternFill(fill_type="solid", fgColor=color)
-        for color in ("FFF2F7FC", "FFFAF6EE")
-    )
+def shade_households(sheet, confidence: Iterable[str]) -> None:
+    """Alternate blue and yellow palettes, with darker fills for stronger matches."""
+    fills = cycle({
+        level: PatternFill(fill_type="solid", fgColor=color)
+        for level, color in palette.items()
+    } for palette in CONFIDENCE_COLORS)
+    levels = iter(confidence)
     unit_column = next(cell.column - 1 for cell in sheet[1] if cell.value == "apartment_unit")
     households = groupby(sheet.iter_rows(min_row=2), key=lambda row: row[unit_column].value)
-    for (_, rows), fill in zip(households, fills):
+    for (_, rows), palette in zip(households, fills):
         for row in rows:
+            level = next(levels)
             for cell in row:
-                cell.fill = fill
+                cell.fill = palette[level]
+                if level == "Strong":
+                    font = copy(cell.font)
+                    font.color = "FFFFFFFF"
+                    cell.font = font
 
 
 def format_sheet(sheet, frame: pd.DataFrame) -> None:
@@ -1807,8 +1879,6 @@ def format_sheet(sheet, frame: pd.DataFrame) -> None:
                     row = sheet.row_dimensions[cell.row]
                     row.height = max(row.height or 15, 15 * len(lines))
         sheet.column_dimensions[letter].width = width
-    if sheet.title == VOTERS_SHEET:
-        shade_households(sheet)
 
 
 def write_output_workbook(
@@ -1825,8 +1895,12 @@ def write_output_workbook(
     with pd.ExcelWriter(destination, engine="openpyxl") as writer:
         for sheet_name, frame in sheets:
             frame = excel_ready(frame)
-            frame.to_excel(writer, sheet_name=sheet_name, index=False)
-            format_sheet(writer.sheets[sheet_name], frame)
+            display = frame.drop(columns="_match_confidence") if sheet_name == VOTERS_SHEET else frame
+            display.to_excel(writer, sheet_name=sheet_name, index=False)
+            sheet = writer.sheets[sheet_name]
+            format_sheet(sheet, display)
+            if sheet_name == VOTERS_SHEET:
+                shade_households(sheet, frame["_match_confidence"])
 
 
 def run_one(

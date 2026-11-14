@@ -203,7 +203,17 @@ Together, the roster people named in `apartment_connection` on `voters_mapped_to
 
 ### `voters_mapped_tohouse` sheet
 
-Each row is one voter-list row linked to one apartment unit. Rows are sorted by apartment unit, then status, then voter-list order. Each unit's rows share a light fill that alternates between consecutive units.
+Each row is one voter-list row linked to one apartment unit. Rows are sorted by apartment unit, then status, then voter-list order. Consecutive units alternate between blue and yellow. Within each unit, dark rows are strong matches, medium rows are probable matches, and light rows need review.
+
+Strong matches meet any of these conditions:
+
+- `name_match_pct` is 100 and the voter name has at least two full words.
+- `name_match_pct` is above 95, the voter name has at least two full words, and `other_hh_matched_booth` is at least 1.
+- `name_match_pct` is above 80 and `other_hh_matched_booth` is at least 3.
+- Two linked people on the voter roll each match a different roster person in the unit. The strong shade also applies to their mapped household group.
+- The voter address contains the configured apartment name after normalizing case, punctuation, and spacing.
+
+Among the remaining rows, a match is probable when `name_match_pct` is above 75 and `other_hh_matched_booth` is at least 3. All other mapped rows need review.
 
 Columns come in this order: apartment details, the roster connection with its part-name and full-name match %, the count of other households matched at the same booth, the link type, the voter-list name and relation, then the other voter-list columns.
 
