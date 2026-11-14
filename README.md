@@ -237,7 +237,7 @@ Common `voter_link_type` values:
 | value | meaning |
 |---|---|
 | `voter_name_match` | The voter name matched a roster name. |
-| `relation_name_match` | The recorded relation matched a roster person and a different voter whose own name links that person to the same flat. Used when the voter's own name matched no one in the apartment. |
+| `relation_name_match` | The recorded relation matched a roster person and a different voter whose own name links that person to the same flat. The two voter-roll names must have the same name parts, or at least 90% full-name similarity with compatible first names or initials. Used when the voter's own name matched no one in the apartment. |
 | `explicit_apartment_address` | The voter address names the apartment. Without a name match, the row is linked to a unit only if the address points to exactly one unit; otherwise it is `Unmapped`. |
 | `same_address_household_member` | The row shares an address and a name link with a voter whose own name matched the roster at that flat. |
 

@@ -382,6 +382,17 @@ def match_allowed_for_source(source_kind: str, match: NameMatch) -> bool:
     return True
 
 
+def relation_identifies_voter(relation_name: object, voter_name: object) -> bool:
+    """Check that two voter-roll names identify the same person before inheriting a flat."""
+    score = name_match_percent(relation_name, voter_name)
+    if score is None or score < round(100 * WHOLE_NAME_RATIO_THRESHOLD):
+        return False
+
+    relation_words = sorted(token.text for token in tokenize_name(relation_name))
+    voter_words = sorted(token.text for token in tokenize_name(voter_name))
+    return relation_words == voter_words or first_identity_anchor_matches(relation_name, voter_name)
+
+
 def leading_initial_letters(tokens: list[NameToken]) -> tuple[str, ...]:
     letters: list[str] = []
     for token in tokens:

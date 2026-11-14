@@ -1390,10 +1390,7 @@ def build_apartment_voter_rows(
                 hit for hit in record["relation_hits"]
                 if any(
                     other_row_id != row_id
-                    and matcher.match_allowed_for_source(
-                        "relation_name", matcher.compare_names(hit["relation_name"], voter_name)
-                    )
-                    and matcher.first_identity_anchor_matches(hit["relation_name"], voter_name)
+                    and matcher.relation_identifies_voter(hit["relation_name"], voter_name)
                     for other_row_id, voter_name in linked_people.get((unit, hit["roster_row_id"]), {}).items()
                 )
             ]
