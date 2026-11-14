@@ -3,9 +3,8 @@
 """Build an Excel workbook per apartment from a voter-list CSV and a source roster in Excel or CSV.
 
 Read apartment settings from data/apartments.csv and standardize source rosters in memory.
-Sheet 1 (voters) lists linked voter rows. Sheet 2 (roster_not_matched) lists roster rows
-that no voter row is connected through. Sheet 3 (unmapped_households) lists household
-groups whose address names the apartment and whose members have no unit link.
+The workbook lists voters linked to a unit, household groups whose address names the
+apartment without a unit link, and roster rows that no voter row is connected through.
 """
 
 from __future__ import annotations
@@ -74,9 +73,9 @@ OUTPUT_COLUMNS = [
 ]
 
 # Workbook sheets and columns for the household-level address report.
-VOTERS_SHEET = "voters"
-ROSTER_NOT_MATCHED_SHEET = "roster_not_matched"
-UNMAPPED_HOUSEHOLDS_SHEET = "unmapped_households"
+VOTERS_SHEET = "voters_mapped_tohouse"
+UNMAPPED_HOUSEHOLDS_SHEET = "voters_unmapped"
+ROSTER_NOT_MATCHED_SHEET = "not_found_in_voterlist"
 UNMAPPED_HOUSEHOLD_COLUMNS = [
     "household_id",
     "house_number",
@@ -1659,14 +1658,14 @@ def format_sheet(sheet, frame: pd.DataFrame) -> None:
 
 def write_output_workbook(
     destination: Path,
-    voter_rows: pd.DataFrame,
+    mapped_voters: pd.DataFrame,
     roster_not_matched: pd.DataFrame,
     unmapped_households: pd.DataFrame,
 ) -> None:
     sheets = (
-        (VOTERS_SHEET, voter_rows),
-        (ROSTER_NOT_MATCHED_SHEET, roster_not_matched),
+        (VOTERS_SHEET, mapped_voters),
         (UNMAPPED_HOUSEHOLDS_SHEET, unmapped_households),
+        (ROSTER_NOT_MATCHED_SHEET, roster_not_matched),
     )
     with pd.ExcelWriter(destination, engine="openpyxl") as writer:
         for sheet_name, frame in sheets:
@@ -1690,8 +1689,9 @@ def run_one(
     voters = matcher.assign_households(voters)
     out, connected, unmapped_households = build_apartment_voter_rows(voters, roster_rows, roster, config)
     not_matched = roster_rows_not_matched(source_rows, roster_rows, connected)
+    mapped_voters = out.loc[out["apartment_unit"].ne("")]
     output_xlsx.parent.mkdir(parents=True, exist_ok=True)
-    write_output_workbook(output_xlsx, out, not_matched, unmapped_households)
+    write_output_workbook(output_xlsx, mapped_voters, not_matched, unmapped_households)
     print(f"{config.key}: rows: {len(out)}")
     if not out.empty:
         print(out["apartment_status"].value_counts().to_string())
@@ -1763,6 +1763,7 @@ def apartment_run_summary(
         "roster_households": int(roster_rows["unit"].nunique()),
         "roster_rows_not_matched": int(len(roster_not_matched)),
         "unmapped_households": len(unmapped_households),
+        "mapped_voter_rows": int(output_rows["apartment_unit"].ne("").sum()),
         "output_rows": int(len(output_rows)),
         "output_households": household_count(output_rows),
         "headline_match_rows": int(len(identity_rows)),
