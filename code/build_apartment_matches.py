@@ -6,6 +6,7 @@ Read apartment settings from data/apartments.csv and standardize source rosters 
 The workbook lists voters linked to a unit, household groups whose address names the
 apartment without a unit link, and roster rows that no voter row is connected through.
 Relation and household links require a voter directly matched to the same flat.
+Two people linked on the voter roll can corroborate each other's roster matches.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from itertools import cycle, groupby
+from itertools import combinations, cycle, groupby
 from pathlib import Path
 from textwrap import wrap
 from typing import Iterable
@@ -1034,6 +1035,8 @@ def add_evidence(
     person_hits: list[dict[str, object]],
     relation_hits: list[dict[str, object]],
     scope: str,
+    *,
+    unique_unit: bool = True,
 ) -> None:
     if not person_hits and not relation_hits:
         return
@@ -1048,7 +1051,11 @@ def add_evidence(
             "member_links": [],
         },
     )
-    record["person_hits"].extend(person_hits)
+    if unique_unit:
+        record["person_hits"].extend(person_hits)
+    else:
+        # A second roster match in the voter household can resolve an ambiguous unit.
+        record["person_hits"].extend({**hit, "requires_household_match": True} for hit in person_hits)
     record["relation_hits"].extend(relation_hits)
     record["scopes"].add(scope)
 
@@ -1111,6 +1118,69 @@ def direct_hit_units(
     units = {row_id: sorted(found) for row_id, found in contextual.items()}
     units.update({row_id: sorted(found) for row_id, found in direct.items()})
     return units
+
+
+def corroborated_roster_matches(
+    unit_evidence: dict[tuple[str, str], dict[int, dict[str, object]]],
+) -> dict[int, tuple[str, str]]:
+    """Find unambiguous pairs of linked voters who match distinct people at one flat."""
+    by_unit: dict[str, dict[int, tuple[pd.Series, dict[str, int]]]] = {}
+    for (unit, _), evidence in unit_evidence.items():
+        for row_id, record in evidence.items():
+            for hit in record["person_hits"]:
+                if "anchor_voter_row_id" in hit:
+                    continue
+                name = connection_name_key(hit["roster_name"])
+                score = matcher.name_match_percent(hit["voter_name"], hit["roster_name"]) or 0
+                _, names = by_unit.setdefault(unit, {}).setdefault(row_id, (record["voter"], {}))
+                names[name] = max(score, names.get(name, 0))
+
+    voter_options: dict[int, dict[tuple[str, str], tuple[bool, bool]]] = {}
+    roster_options: dict[tuple[str, str], dict[int, tuple[bool, bool]]] = {}
+    pairs: set[tuple[int, str, int, str, str]] = set()
+    for unit, matches in by_unit.items():
+        for (first_id, (first, first_names)), (second_id, (second, second_names)) in combinations(matches.items(), 2):
+            same_address = (
+                first["household_id"] is not None
+                and first["household_id"] == second["household_id"]
+                and first["address_norm"] == second["address_norm"]
+            )
+            named_relation = (
+                matcher.relation_identifies_voter(first["relation_name"], second["name"])
+                or matcher.relation_identifies_voter(second["relation_name"], first["name"])
+            )
+            if not (same_address or named_relation):
+                continue
+            for first_name, first_score in first_names.items():
+                if first_score != max(first_names.values()):
+                    continue
+                for second_name, second_score in second_names.items():
+                    if first_name == second_name or second_score != max(second_names.values()):
+                        continue
+                    pairs.add((first_id, first_name, second_id, second_name, unit))
+                    for row_id, name in ((first_id, first_name), (second_id, second_name)):
+                        key = unit, name
+                        rank = named_relation, same_address
+                        options = voter_options.setdefault(row_id, {})
+                        options[key] = max(rank, options.get(key, rank))
+                        options = roster_options.setdefault(key, {})
+                        options[row_id] = max(rank, options.get(row_id, rank))
+
+    # Prefer a named relation over a shared address. Both sides must agree.
+    best_voter_options = {
+        row_id: {key for key, rank in options.items() if rank == max(options.values())}
+        for row_id, options in voter_options.items()
+    }
+    best_roster_options = {
+        key: {row_id for row_id, rank in options.items() if rank == max(options.values())}
+        for key, options in roster_options.items()
+    }
+    matched = {}
+    for first_id, first_name, second_id, second_name, unit in pairs:
+        entries = ((first_id, (unit, first_name)), (second_id, (unit, second_name)))
+        if all(best_voter_options[row_id] == {key} and best_roster_options[key] == {row_id} for row_id, key in entries):
+            matched.update(entries)
+    return matched
 
 
 def unit_output_values(config: ApartmentConfig, roster_rows: pd.DataFrame, unit: str) -> dict[str, object]:
@@ -1319,9 +1389,10 @@ def build_apartment_voter_rows(
                 add_evidence(
                     evidence_by_row,
                     detail["voter"],
-                    detail["person_hits"] if own_name_units == [unit] else [],
+                    detail["person_hits"],
                     detail["relation_hits"],
                     "number_only_address",
+                    unique_unit=own_name_units == [unit],
                 )
 
         long_number_rows = unit_rows[
@@ -1354,13 +1425,29 @@ def build_apartment_voter_rows(
                 add_evidence(
                     evidence_by_row,
                     detail["voter"],
-                    detail["person_hits"] if own_name_units == [unit] else [],
+                    detail["person_hits"],
                     detail["relation_hits"],
                     "long_number_address",
+                    unique_unit=own_name_units == [unit],
                 )
 
         if evidence_by_row:
             unit_evidence[(unit, group_label)] = evidence_by_row
+
+    # Reserve only the two people in a corroborated match and their roster entries.
+    corroborated = corroborated_roster_matches(unit_evidence)
+    claimed_roster_entries = {key: row_id for row_id, key in corroborated.items()}
+    for (unit, _), evidence in unit_evidence.items():
+        for row_id, record in evidence.items():
+            reserved = corroborated.get(row_id)
+            kept_hits = []
+            for hit in record["person_hits"]:
+                key = unit, connection_name_key(hit["roster_name"])
+                if reserved == key and "anchor_voter_row_id" not in hit:
+                    kept_hits.append(hit)
+                elif reserved is None and key not in claimed_roster_entries and not hit.get("requires_household_match"):
+                    kept_hits.append(hit)
+            record["person_hits"] = kept_hits
 
     # Resolve own-name links before checking any dependent evidence.
     independent_hits = {

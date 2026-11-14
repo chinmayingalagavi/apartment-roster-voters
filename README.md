@@ -297,6 +297,8 @@ Address-only rows are linked to a unit only when the address names the apartment
 
 If an address points to multiple possible units, name or relation evidence can choose the unit. If the address names the apartment but there is no name or relation evidence and no single unit (none found, or several possible), the row is kept with status `Unmapped` and no unit.
 
+Two distinct voters can confirm a flat when each independently matches a different roster person there. The voter roll must link them through a recorded relation or through the same address in the same voter-roll household group. An unambiguous pair reserves those voter and roster matches within the apartment. Other people at the flat can still match through the usual rules. When pairs compete, a recorded relation takes priority, followed by a shared address within the same household group. Equally supported alternatives follow the usual matching rules.
+
 ## Check After Edits
 
 After editing the code, run:
