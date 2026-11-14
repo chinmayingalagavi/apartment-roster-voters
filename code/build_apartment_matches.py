@@ -9,7 +9,7 @@ link, and roster rows that no voter row is connected through.
 Relation and household links require a voter directly matched to the same flat.
 Two people linked on the voter roll can corroborate each other's roster matches.
 Rank competing voter records for each roster person by name score and booth support.
-Shade mapped rows by match confidence and separate flats with dark borders.
+Show match strength in the voter sheets, shade voter rows, and separate flats with dark borders.
 Use the name that produced the similarity score for the confidence word count.
 Keep review rows only when the linked voter's own-name score is above 70%.
 """
@@ -57,11 +57,14 @@ VOTER_OUTPUT_COLUMNS = [
     "pollingaddress",
 ]
 
-APARTMENT_OUTPUT_COLUMNS = [
+APARTMENT_UNIT_COLUMNS = [
     "apartment",
     "apartment_unit",
     "apartment_block",
     "apartment_unit_part",
+]
+
+MATCH_DETAIL_COLUMNS = [
     "apartment_status",
     "apartment_connection",
     "part_name_match",
@@ -70,16 +73,13 @@ APARTMENT_OUTPUT_COLUMNS = [
     "voter_link_type",
 ]
 
-# Rows read as one apartment household per unit: apartment details first, then the
-# booth household count and link type, then the voter-list name and relation, then the
-# remaining voter columns.
 VOTER_NAME_COLUMNS = ["voter_name", "relation_type", "relation_name"]
-
-OUTPUT_COLUMNS = [
-    *APARTMENT_OUTPUT_COLUMNS,
+VOTER_DETAIL_COLUMNS = [
     *VOTER_NAME_COLUMNS,
     *[column for column in VOTER_OUTPUT_COLUMNS if column not in VOTER_NAME_COLUMNS],
 ]
+OUTPUT_COLUMNS = [*APARTMENT_UNIT_COLUMNS, *MATCH_DETAIL_COLUMNS, *VOTER_DETAIL_COLUMNS]
+MAPPED_OUTPUT_COLUMNS = [*APARTMENT_UNIT_COLUMNS, "strength", *VOTER_DETAIL_COLUMNS, *MATCH_DETAIL_COLUMNS]
 
 # Workbook sheets and columns for the household-level address report.
 VOTERS_SHEET = "voters_mapped_tohouse"
@@ -94,7 +94,9 @@ UNMAPPED_HOUSEHOLD_COLUMNS = [
     "voter_count",
     "voter_serial_numbers",
 ]
-UNMAPPED_OUTPUT_COLUMNS = list(dict.fromkeys([*UNMAPPED_HOUSEHOLD_COLUMNS, *OUTPUT_COLUMNS]))
+UNMAPPED_OUTPUT_COLUMNS = list(dict.fromkeys([
+    *UNMAPPED_HOUSEHOLD_COLUMNS, *APARTMENT_UNIT_COLUMNS, "strength", *MATCH_DETAIL_COLUMNS, *VOTER_DETAIL_COLUMNS,
+]))
 MAX_EXCEL_COLUMN_WIDTH = 50
 LOW_CONFIDENCE = "Below review cutoff"
 CONFIDENCE_COLORS = {
@@ -1960,12 +1962,24 @@ def write_output_workbook(
     with pd.ExcelWriter(destination, engine="openpyxl") as writer:
         for sheet_name, frame in sheets:
             frame = excel_ready(frame)
-            voter_sheet = sheet_name in (VOTERS_SHEET, UNMAPPED_HOUSEHOLDS_SHEET)
-            display = frame.drop(columns="_match_confidence") if voter_sheet else frame
+            display = frame
+            if sheet_name in (VOTERS_SHEET, UNMAPPED_HOUSEHOLDS_SHEET):
+                strength = frame["_match_confidence"].replace({"Probable": "Medium"})
+                if sheet_name == VOTERS_SHEET:
+                    link_types = frame["voter_link_type"].str.split(";")
+                    own_name = link_types.map(lambda kinds: "voter_name_match" in kinds)
+                    household = link_types.map(
+                        lambda kinds: "relation_name_match" in kinds or "same_address_household_member" in kinds
+                    )
+                    strength = strength.mask(household & ~own_name, strength + " - household")
+                    strength = strength.mask(own_name, strength + " - name linked")
+                    display = frame.assign(strength=strength)[MAPPED_OUTPUT_COLUMNS]
+                else:
+                    display = frame.assign(strength=strength)[UNMAPPED_OUTPUT_COLUMNS]
             display.to_excel(writer, sheet_name=sheet_name, index=False)
             sheet = writer.sheets[sheet_name]
             format_sheet(sheet, display)
-            if voter_sheet:
+            if sheet_name in (VOTERS_SHEET, UNMAPPED_HOUSEHOLDS_SHEET):
                 shade_households(sheet, frame["_match_confidence"])
 
 
@@ -2101,7 +2115,7 @@ def write_run_log(
         "apartments_csv_columns": APARTMENT_CONFIG_COLUMNS,
         "individual_related_columns": INDIVIDUAL_RELATED_COLUMNS,
         "household_related_columns": HOUSEHOLD_RELATED_COLUMNS,
-        "voters_sheet_columns": OUTPUT_COLUMNS,
+        "voters_sheet_columns": MAPPED_OUTPUT_COLUMNS,
         "generated_at": generated_at.isoformat(timespec="seconds"),
         "voter_csv": path_for_log(voter_csv),
         "apartments_csv": path_for_log(apartments_csv),

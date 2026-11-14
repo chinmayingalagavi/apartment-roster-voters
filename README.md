@@ -202,7 +202,7 @@ Together, the roster people named in `apartment_connection` on the first two she
 
 ### `voters_mapped_tohouse` sheet
 
-Each row is one voter-list row linked to one apartment unit. Rows are sorted by apartment unit, then status, then voter-list order. A dark horizontal line separates units. Light green marks strong matches, light blue marks probable matches, and light grey marks rows that need review.
+Each row is one voter-list row linked to one apartment unit. Rows are sorted by apartment unit, then status, then voter-list order. A dark horizontal line separates units. The `strength` column shows `Strong` for green, `Medium` for blue, and `Needs review` for grey.
 
 Strong matches meet any of these conditions:
 
@@ -216,7 +216,7 @@ Among the remaining rows, a match is probable when `name_match_pct` is 100, or w
 
 The word count uses the voter's own name for direct matches, the recorded relative's name for relation matches, and the linked voter's name for household-member matches. Initials do not count as full words.
 
-Columns come in this order: apartment details, the roster connection with its part-name and full-name match %, the count of other households matched at the same booth, the link type, the voter-list name and relation, then the other voter-list columns.
+The four apartment and flat columns come first, followed by `strength` in column E and the voter-list details. The last six columns show roster status, roster connection, part-name score, full-name score, other households matched at the booth, and link type.
 
 | column | meaning |
 |---|---|
@@ -224,6 +224,7 @@ Columns come in this order: apartment details, the roster connection with its pa
 | `apartment_unit` | Normalized unit id used by the matcher. |
 | `apartment_block` | Normalized block value, if any. |
 | `apartment_unit_part` | Normalized non-block unit part. |
+| `strength` | Match strength and how the voter was linked. Own-name matches use `- name linked`. Matches through a recorded relative or same-address household member use `- household`. |
 | `apartment_status` | Status from the roster (for example `Owner`, `Tenant`, or a `Yes`/`No` residency flag). `Unassigned` means the unit is known and the roster status is unresolved. |
 | `apartment_connection` | The roster person this voter row is connected through (see below). Blank for address-only rows. |
 | `part_name_match` | 0–100 similarity of the part of the name the match rule used: the weakest matched word pair (identical words = 100), or the whole-name similarity when the whole-name rule matched. Never below 90 for a name match. Household-member rows show the value of the voter they are linked through. Blank for address-only and `Unmapped` rows. |
@@ -260,7 +261,7 @@ Rows marked `Unmapped` summarize voter-roll household groups. Each row includes 
 
 For these household groups, the address must contain the full name from `apartment_name` after normalizing case, punctuation, and spacing. A group appears when at least one row meets that rule and no member links to a unit. The voter count and serial numbers refer to the qualifying rows.
 
-Rows marked `Unassigned` list one voter-to-flat link per row. They include the known flat, voter details, confidence shading, and any name evidence. The roster status is unresolved.
+Rows marked `Unassigned` list one voter-to-flat link per row. They include the known flat, voter details, confidence shading, and any name evidence. Their `strength` column gives the plain confidence label. Household summaries without a flat leave `strength` blank.
 
 ## Run Logs
 
