@@ -7,6 +7,7 @@ The workbook lists voters linked to a unit, household groups whose address names
 apartment without a unit link, and roster rows that no voter row is connected through.
 Relation and household links require a voter directly matched to the same flat.
 Two people linked on the voter roll can corroborate each other's roster matches.
+Rank competing voter records for each roster person by name score and booth support.
 """
 
 from __future__ import annotations
@@ -1283,6 +1284,32 @@ def summarize_unmapped_households(
     return pd.DataFrame(households, columns=UNMAPPED_HOUSEHOLD_COLUMNS)
 
 
+def dominated_voter_links(out: pd.DataFrame) -> dict[tuple[int, str], set[str]]:
+    """Find own-name links beaten by at least two distinct voter rows on name and booth evidence."""
+    candidates: dict[tuple[str, str], dict[int, tuple[int, int]]] = {}
+    for _, row in out.iterrows():
+        if "voter_name_match" not in row["voter_link_type"].split(";"):
+            continue
+        for name in row["_connection_names"]:
+            key = row["apartment_unit"], connection_name_key(name)
+            candidates.setdefault(key, {})[int(row["_row_id"])] = (
+                int(row["name_match_pct"]), int(row["other_hh_matched_booth"])
+            )
+
+    discarded: dict[tuple[int, str], set[str]] = {}
+    for (unit, name), links in candidates.items():
+        for row_id, (name_score, booth_count) in links.items():
+            dominators = sum(
+                other_score >= name_score
+                and other_count >= booth_count
+                and (other_score > name_score or other_count > booth_count)
+                for other_score, other_count in links.values()
+            )
+            if dominators >= 2:
+                discarded.setdefault((row_id, unit), set()).add(name)
+    return discarded
+
+
 def build_apartment_voter_rows(
     voters: pd.DataFrame,
     roster_rows: pd.DataFrame,
@@ -1290,7 +1317,6 @@ def build_apartment_voter_rows(
     config: ApartmentConfig,
 ) -> tuple[pd.DataFrame, set[tuple[str, str]], pd.DataFrame]:
     """Return voter rows, connected (unit, roster name key) pairs, and unmapped household groups."""
-    usable = voters.copy()
     identity_usable = voters.copy()
     number_only_groups = {
         str(key): group.copy()
@@ -1313,18 +1339,17 @@ def build_apartment_voter_rows(
     }
     number_only_group_cache: dict[str, dict[str, object]] = {}
     long_number_group_cache: dict[str, dict[str, object]] = {}
-    records: list[dict[str, object]] = []
     unit_evidence: dict[tuple[str, str], dict[int, dict[str, object]]] = {}
-    emitted_row_unit_keys: set[tuple[int, str]] = set()
-    identity_supported_row_ids: set[int] = set()
 
+    # Index voter positions by candidate unit once for the full constituency roll.
+    candidate_units = identity_usable["identity_candidate_units"].reset_index(drop=True).explode().dropna()
+    positions_by_unit = candidate_units.groupby(candidate_units, sort=False).groups
     for unit, group_label in sorted(roster):
-        unit_roster = roster[(unit, group_label)]
-        unit_rows = identity_usable[
-            identity_usable["identity_candidate_units"].map(lambda units: unit in matcher.voter_candidate_units(units))
-        ]
-        if unit_rows.empty:
+        positions = positions_by_unit.get(unit)
+        if positions is None:
             continue
+        unit_roster = roster[(unit, group_label)]
+        unit_rows = identity_usable.iloc[positions.unique()]
 
         evidence_by_row: dict[int, dict[str, object]] = {}
 
@@ -1449,6 +1474,74 @@ def build_apartment_voter_rows(
                     kept_hits.append(hit)
             record["person_hits"] = kept_hits
 
+    # Count booth support once with all candidates present, so pruning cannot change its own rankings.
+    out, unmapped_rows = resolve_voter_links(voters, roster_rows, config, unit_evidence, same_address_groups, {})
+    if not out.empty:
+        booth_units = matched_units_at_booth(out)
+        out["other_hh_matched_booth"] = other_households_matched_at_booth(out, booth_units)
+        discarded = dominated_voter_links(out)
+        if discarded:
+            out, unmapped_rows = resolve_voter_links(
+                voters, roster_rows, config, unit_evidence, same_address_groups, discarded,
+            )
+            if not out.empty:
+                out["other_hh_matched_booth"] = other_households_matched_at_booth(out, booth_units)
+
+    connected: set[tuple[str, str]] = set()
+    if out.empty:
+        return (
+            pd.DataFrame(columns=OUTPUT_COLUMNS),
+            connected,
+            pd.DataFrame(columns=UNMAPPED_HOUSEHOLD_COLUMNS),
+        )
+    unmapped_households = summarize_unmapped_households(
+        unmapped_rows,
+        voters,
+        out.loc[out["apartment_unit"].ne(""), "_row_id"],
+        config,
+    )
+    connected = {
+        (str(unit), connection_name_key(name))
+        for unit, names in zip(out["apartment_unit"], out["_connection_names"])
+        for name in names
+    }
+    # Put apartment-only rows after the rows with a unit.
+    out["_unmapped_last"] = out["apartment_status"].eq(UNMAPPED_STATUS)
+    sort_cols = ["_unmapped_last", "apartment_unit", "apartment_status", "part", "serial_number"]
+    out = out.sort_values(sort_cols).reset_index(drop=True)
+    out["part_name_match"] = out["part_name_match"].astype("Int64")
+    out["name_match_pct"] = out["name_match_pct"].astype("Int64")
+    return out[OUTPUT_COLUMNS], connected, unmapped_households
+
+
+def resolve_voter_links(
+    voters: pd.DataFrame,
+    roster_rows: pd.DataFrame,
+    config: ApartmentConfig,
+    unit_evidence: dict[tuple[str, str], dict[int, dict[str, object]]],
+    same_address_groups: dict[str, pd.DataFrame],
+    discarded: dict[tuple[int, str], set[str]],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build output rows using only the direct matches still eligible to support other voters."""
+    unit_evidence = {
+        (unit, status): {
+            row_id: {
+                **record,
+                "scopes": record["scopes"].copy(),
+                "member_links": [],
+                "person_hits": [
+                    hit for hit in record["person_hits"]
+                    if connection_name_key(hit["roster_name"]) not in discarded.get((row_id, unit), ())
+                ],
+            }
+            for row_id, record in evidence.items()
+        }
+        for (unit, status), evidence in unit_evidence.items()
+    }
+    records: list[dict[str, object]] = []
+    emitted_row_unit_keys: set[tuple[int, str]] = set()
+    identity_supported_row_ids: set[int] = set()
+
     # Resolve own-name links before checking any dependent evidence.
     independent_hits = {
         (unit, row_id, hit["roster_row_id"])
@@ -1495,7 +1588,8 @@ def build_apartment_voter_rows(
                 if group_key:
                     anchors_by_address.setdefault(group_key, []).append(record)
             elif (
-                row_id in direct_row_ids
+                (row_id, unit) in discarded
+                or row_id in direct_row_ids
                 or not record["relation_hits"]
                 or relation_units.get(row_id) != {unit}
             ):
@@ -1505,7 +1599,7 @@ def build_apartment_voter_rows(
             group_rows = same_address_groups[group_key]
             for _, voter in group_rows.iterrows():
                 row_id = int(voter["_row_id"])
-                if row_id in evidence_by_row or row_id in direct_row_ids:
+                if row_id in evidence_by_row or row_id in direct_row_ids or (row_id, unit) in discarded:
                     continue
                 if unit not in matcher.voter_candidate_units(voter["candidate_units"]):
                     continue
@@ -1555,9 +1649,9 @@ def build_apartment_voter_rows(
             records.append(record)
 
     for unit in sorted(roster_rows["unit"].unique()):
-        explicit_rows = usable[
-            (usable["address_unit"] == unit)
-            & usable["has_target_label"]
+        explicit_rows = voters[
+            (voters["address_unit"] == unit)
+            & voters["has_target_label"]
         ].copy()
         if explicit_rows.empty:
             continue
@@ -1567,7 +1661,7 @@ def build_apartment_voter_rows(
             if int(voter["_row_id"]) in identity_supported_row_ids:
                 continue
             row_unit_key = (int(voter["_row_id"]), unit)
-            if row_unit_key in emitted_row_unit_keys:
+            if row_unit_key in emitted_row_unit_keys or row_unit_key in discarded:
                 continue
             item = {
                 "voter": voter,
@@ -1589,10 +1683,10 @@ def build_apartment_voter_rows(
     # (no unit read, or several possible), and who were not linked to any unit by name.
     # They are kept with the apartment but no unit, status Unmapped.
     linked_row_ids = {int(record["_row_id"]) for record in records} | identity_supported_row_ids
-    unmapped_rows = usable[
-        usable["has_target_label"]
-        & usable["address_unit"].isna()
-        & ~usable["_row_id"].isin(linked_row_ids)
+    unmapped_rows = voters[
+        voters["has_target_label"]
+        & voters["address_unit"].isna()
+        & ~voters["_row_id"].isin(linked_row_ids)
     ].sort_values(["part", "serial_number", "_row_id"])
     for _, voter in unmapped_rows.iterrows():
         record = base_output_record(voter, config)
@@ -1610,50 +1704,32 @@ def build_apartment_voter_rows(
         set_connection_fields(record, [])
         records.append(record)
 
-    out = pd.DataFrame(records)
-    out = collapse_unresolved_group_records(out)
-    connected: set[tuple[str, str]] = set()
-    if out.empty:
-        return (
-            pd.DataFrame(columns=OUTPUT_COLUMNS),
-            connected,
-            pd.DataFrame(columns=UNMAPPED_HOUSEHOLD_COLUMNS),
-        )
-    unmapped_households = summarize_unmapped_households(
-        unmapped_rows,
-        voters,
-        out.loc[out["apartment_unit"].ne(""), "_row_id"],
-        config,
-    )
-    # A row's connection names are roster people in that row's own unit.
-    connected = {
-        (str(unit), connection_name_key(name))
-        for unit, names in zip(out["apartment_unit"], out["_connection_names"])
-        for name in names
-    }
-    # Unmapped rows (no unit) go after all the apartment households.
-    out["_unmapped_last"] = out["apartment_status"].eq(UNMAPPED_STATUS)
-    sort_cols = ["_unmapped_last", "apartment_unit", "apartment_status", "part", "serial_number"]
-    out = out.sort_values(sort_cols).reset_index(drop=True)
-    out = out.drop(columns=["_row_id", "_connection_candidates", "_connection_names", "_unmapped_last"])
-    out["part_name_match"] = out["part_name_match"].astype("Int64")
-    out["name_match_pct"] = out["name_match_pct"].astype("Int64")
-    out["other_hh_matched_booth"] = other_households_matched_at_booth(out)
-    return out[OUTPUT_COLUMNS], connected, unmapped_households
+    return collapse_unresolved_group_records(pd.DataFrame(records)), unmapped_rows
 
 
-def other_households_matched_at_booth(out: pd.DataFrame) -> pd.Series:
+def polling_booth_keys(out: pd.DataFrame) -> pd.Series:
+    return out["part"].fillna("").astype(str) + "|" + out["pollingname"].fillna("").astype(str)
+
+
+def matched_units_at_booth(out: pd.DataFrame) -> dict[str, set[str]]:
+    units_by_booth: dict[str, set[str]] = {}
+    for booth, unit in zip(polling_booth_keys(out), out["apartment_unit"]):
+        if unit:
+            units_by_booth.setdefault(booth, set()).add(unit)
+    return units_by_booth
+
+
+def other_households_matched_at_booth(out: pd.DataFrame, booth_units: dict[str, set[str]]) -> pd.Series:
     """Count the other apartment households (units) with a matched voter at each row's polling booth.
 
     A booth is the voter-list part with its polling station. 0 means this row's household is the
     only one matched there. Unmapped rows have no unit, so every household at their booth counts.
     """
-    booth = out["part"].fillna("").astype(str) + "|" + out["pollingname"].fillna("").astype(str)
-    units = out["apartment_unit"].fillna("").astype(str)
-    has_unit = units.ne("")
-    households_at_booth = units[has_unit].groupby(booth[has_unit]).nunique()
-    count = booth.map(households_at_booth).fillna(0).astype(int)
-    return count - has_unit.astype(int)
+    counts = []
+    for booth, unit in zip(polling_booth_keys(out), out["apartment_unit"]):
+        units = booth_units.get(booth, ())
+        counts.append(len(units) - (unit in units))
+    return pd.Series(counts, index=out.index, dtype=int)
 
 
 def roster_rows_not_matched(

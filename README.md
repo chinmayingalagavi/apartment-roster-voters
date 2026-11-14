@@ -217,7 +217,7 @@ Columns come in this order: apartment details, the roster connection with its pa
 | `apartment_connection` | The roster person this voter row is connected through (see below). Blank for address-only rows. |
 | `part_name_match` | 0–100 similarity of the part of the name the match rule used: the weakest matched word pair (identical words = 100), or the whole-name similarity when the whole-name rule matched. Never below 90 for a name match. Household-member rows show the value of the voter they are linked through. Blank for address-only and `Unmapped` rows. |
 | `name_match_pct` | 0–100 similarity between the voter-list name (or relation name) and `apartment_connection`. Household-member rows show the match % of the voter they are linked through. Blank for address-only and `Unmapped` rows. |
-| `other_hh_matched_booth` | Number of other apartment households (units) with at least one matched voter at this row's polling booth (`part`). 0 means this row's household is the only one matched there. `Unmapped` rows have no unit, so every household matched at their booth counts. A building's residents usually share a few booths, so real matches tend to have many other households at their booth, while chance name matches are often alone. |
+| `other_hh_matched_booth` | Number of other units with a candidate voter link at this row's polling booth before competing links are filtered. A row without a unit counts all units linked to the booth at that stage. |
 | `voter_link_type` | Why this voter row was included. |
 | `voter_name`, `relation_type`, `relation_name` | Name fields from the voter list. `voter_name` is the voter list's `name` column. |
 | other columns | The remaining voter-list columns. |
@@ -298,6 +298,8 @@ Address-only rows are linked to a unit only when the address names the apartment
 If an address points to multiple possible units, name or relation evidence can choose the unit. If the address names the apartment but there is no name or relation evidence and no single unit (none found, or several possible), the row is kept with status `Unmapped` and no unit.
 
 Two distinct voters can confirm a flat when each independently matches a different roster person there. The voter roll must link them through a recorded relation or through the same address in the same voter-roll household group. An unambiguous pair reserves those voter and roster matches within the apartment. Other people at the flat can still match through the usual rules. When pairs compete, a recorded relation takes priority, followed by a shared address within the same household group. Equally supported alternatives follow the usual matching rules.
+
+For each roster person in a flat, an own-name candidate is kept if at most one other distinct voter record is at least as high on both full-name similarity and booth support and strictly higher on one. Equal scores on both measures stay tied. Booth support is counted once before filtering. Relation and household links are rebuilt using the retained own-name matches.
 
 ## Check After Edits
 
