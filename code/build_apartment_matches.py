@@ -8,7 +8,7 @@ apartment without a unit link, and roster rows that no voter row is connected th
 Relation and household links require a voter directly matched to the same flat.
 Two people linked on the voter roll can corroborate each other's roster matches.
 Rank competing voter records for each roster person by name score and booth support.
-Shade mapped rows by match confidence in alternating blue and yellow flats.
+Shade mapped rows by match confidence and separate flats with dark borders.
 Use the name that produced the similarity score for the confidence word count.
 """
 
@@ -20,13 +20,13 @@ import re
 from copy import copy
 from dataclasses import dataclass
 from datetime import datetime
-from itertools import combinations, cycle, groupby
+from itertools import combinations, groupby
 from pathlib import Path
 from textwrap import wrap
 from typing import Iterable
 
 import pandas as pd
-from openpyxl.styles import Alignment, PatternFill
+from openpyxl.styles import Alignment, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 import matching as matcher
@@ -93,10 +93,12 @@ UNMAPPED_HOUSEHOLD_COLUMNS = [
     "voter_serial_numbers",
 ]
 MAX_EXCEL_COLUMN_WIDTH = 50
-CONFIDENCE_COLORS = (
-    {"Strong": "FF1D527E", "Probable": "FF8FB9DD", "Needs review": "FFEAF2FC"},
-    {"Strong": "FF806000", "Probable": "FFE8C35B", "Needs review": "FFFFF6D7"},
-)
+CONFIDENCE_COLORS = {
+    "Strong": "FFDCEFE0",
+    "Probable": "FFDEECF9",
+    "Needs review": "FFF0F1F3",
+}
+HOUSEHOLD_BORDER = Side(style="medium", color="FF344054")
 
 # Status for voters whose address names the apartment but maps to no single unit.
 UNMAPPED_STATUS = "Unmapped"
@@ -1848,23 +1850,26 @@ def excel_ready(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def shade_households(sheet, confidence: Iterable[str]) -> None:
-    """Alternate blue and yellow palettes, with darker fills for stronger matches."""
-    fills = cycle({
+    """Color mapped rows by confidence and draw a line between flats."""
+    fills = {
         level: PatternFill(fill_type="solid", fgColor=color)
-        for level, color in palette.items()
-    } for palette in CONFIDENCE_COLORS)
-    levels = iter(confidence)
+        for level, color in CONFIDENCE_COLORS.items()
+    }
     unit_column = next(cell.column - 1 for cell in sheet[1] if cell.value == "apartment_unit")
-    households = groupby(sheet.iter_rows(min_row=2), key=lambda row: row[unit_column].value)
-    for (_, rows), palette in zip(households, fills):
-        for row in rows:
-            level = next(levels)
+    rows_with_confidence = zip(sheet.iter_rows(min_row=2), confidence, strict=True)
+    households = groupby(rows_with_confidence, key=lambda item: item[0][unit_column].value)
+    for household_index, (_, rows) in enumerate(households):
+        for row_index, (row, level) in enumerate(rows):
             for cell in row:
-                cell.fill = palette[level]
-                if level == "Strong":
+                cell.fill = fills[level]
+                if cell.font.color is not None and cell.font.color.type == "rgb" and cell.font.color.rgb == "FFFFFFFF":
                     font = copy(cell.font)
-                    font.color = "FFFFFFFF"
+                    font.color = "FF17202A"
                     cell.font = font
+                if household_index and row_index == 0:
+                    border = copy(cell.border)
+                    border.top = HOUSEHOLD_BORDER
+                    cell.border = border
 
 
 def format_sheet(sheet, frame: pd.DataFrame) -> None:
