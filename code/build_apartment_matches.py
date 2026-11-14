@@ -1370,7 +1370,7 @@ def match_confidence(out: pd.DataFrame, voters: pd.DataFrame, apartment_name: st
         | pd.Series(corroborated, index=out.index, dtype=bool)
     )
     confidence = pd.Series("Needs review", index=out.index)
-    confidence.loc[scores.gt(75) & booth_counts.ge(3)] = "Probable"
+    confidence.loc[scores.eq(100) | (scores.gt(75) & booth_counts.ge(3))] = "Probable"
     confidence.loc[strong] = "Strong"
     return confidence
 

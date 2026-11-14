@@ -213,7 +213,7 @@ Strong matches meet any of these conditions:
 - Two linked people on the voter roll each match a different roster person in the unit. The strong shade also applies to their mapped household group.
 - The voter address contains the configured apartment name after normalizing case, punctuation, and spacing.
 
-Among the remaining rows, a match is probable when `name_match_pct` is above 75 and `other_hh_matched_booth` is at least 3. All other mapped rows need review.
+Among the remaining rows, a match is probable when `name_match_pct` is 100, or when it is above 75 and `other_hh_matched_booth` is at least 3. All other mapped rows need review.
 
 Columns come in this order: apartment details, the roster connection with its part-name and full-name match %, the count of other households matched at the same booth, the link type, the voter-list name and relation, then the other voter-list columns.
 
