@@ -191,12 +191,13 @@ Each apartment gets one Excel workbook. The default path is:
 output/{apartment_key}_voters.xlsx
 ```
 
-Each workbook has two sheets:
+Each workbook has three sheets:
 
 | sheet | contents |
 |---|---|
 | `voters` | The voter-list rows linked to the apartment, described below. |
 | `roster_not_matched` | The roster rows that no voter row is connected through, in roster order and in the roster format used for matching. |
+| `unmapped_households` | Household groups whose voter-roll address gives the configured apartment name and whose members have no linked unit. |
 
 Together, the roster people named in `apartment_connection` on the `voters` sheet and the rows on the `roster_not_matched` sheet cover the prepared roster. A roster person counts as matched only when a voter row in their own unit names them in `apartment_connection`. A roster person whose household was found through someone else, or only through an address, is still listed on `roster_not_matched`.
 
@@ -242,6 +243,12 @@ Common `voter_link_type` values:
 
 Multiple link types are separated by semicolons.
 
+### `unmapped_households` sheet
+
+The sheet lists one row per voter-roll household group. It includes the reported address, voter-roll part and section, polling station, voter count, and voter serial numbers for lookup in the `voters` sheet. Household IDs group nearby entries in the same part and section using the matcher's address or unit key.
+
+The address must contain the full name from `apartment_name` after normalizing case, punctuation, and spacing. A group appears when at least one row meets that rule and no member links to a unit. The voter count and serial numbers refer to the qualifying rows.
+
 ## Run Logs
 
 Every run writes a timestamped JSON log:
@@ -268,6 +275,7 @@ Then it records run metadata and one summary per apartment:
 | `roster_rows` | Number of person rows in the apartment roster. |
 | `roster_households` | Number of unique roster units. |
 | `roster_rows_not_matched` | Number of rows on the `roster_not_matched` sheet. |
+| `unmapped_households` | Number of household groups on the `unmapped_households` sheet. |
 | `output_rows` | Number of voter rows on the `voters` sheet. |
 | `output_households` | Number of unique apartment units in the output. |
 | `headline_match_rows` | Rows with a voter-name or relation-name match. |

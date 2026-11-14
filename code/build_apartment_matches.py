@@ -4,7 +4,8 @@
 
 Read apartment settings from data/apartments.csv and standardize source rosters in memory.
 Sheet 1 (voters) lists linked voter rows. Sheet 2 (roster_not_matched) lists roster rows
-that no voter row is connected through, in roster order.
+that no voter row is connected through. Sheet 3 (unmapped_households) lists household
+groups whose address names the apartment and whose members have no unit link.
 """
 
 from __future__ import annotations
@@ -15,9 +16,11 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from textwrap import wrap
 from typing import Iterable
 
 import pandas as pd
+from openpyxl.styles import Alignment
 from openpyxl.utils import get_column_letter
 
 import matching as matcher
@@ -70,9 +73,19 @@ OUTPUT_COLUMNS = [
     *[column for column in VOTER_OUTPUT_COLUMNS if column not in VOTER_NAME_COLUMNS],
 ]
 
-# Output workbook sheets: the linked voter rows, then the roster rows no voter row is connected through.
+# Workbook sheets and columns for the household-level address report.
 VOTERS_SHEET = "voters"
 ROSTER_NOT_MATCHED_SHEET = "roster_not_matched"
+UNMAPPED_HOUSEHOLDS_SHEET = "unmapped_households"
+UNMAPPED_HOUSEHOLD_COLUMNS = [
+    "household_id",
+    "house_number",
+    "part",
+    "section_raw",
+    "pollingname",
+    "voter_count",
+    "voter_serial_numbers",
+]
 MAX_EXCEL_COLUMN_WIDTH = 50
 
 # Status for voters whose address names the apartment but maps to no single unit.
@@ -1199,13 +1212,43 @@ def collapse_unresolved_group_records(out: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(collapsed)
 
 
+def summarize_unmapped_households(
+    unmapped_rows: pd.DataFrame,
+    voters: pd.DataFrame,
+    mapped_row_ids: pd.Series,
+    config: ApartmentConfig,
+) -> pd.DataFrame:
+    """Summarize household groups with an exact apartment name and no linked unit."""
+    normalized_name = matcher.normalize_address(config.apartment_name)
+    exact_name = re.compile(rf"\b{re.escape(normalized_name)}\b")
+    named_rows = unmapped_rows["address_norm"].str.contains(exact_name, na=False)
+    mapped_households = voters.loc[voters["_row_id"].isin(mapped_row_ids), "household_id"]
+    report_rows = unmapped_rows[named_rows & ~unmapped_rows["household_id"].isin(mapped_households)]
+
+    households = []
+    for household_id, rows in report_rows.groupby("household_id", sort=False):
+        first = rows.iloc[0]
+        households.append(
+            {
+                "household_id": household_id,
+                "house_number": "; ".join(rows["house_number"].astype(str).unique()),
+                "part": first["part"],
+                "section_raw": first["section_raw"],
+                "pollingname": first["pollingname"],
+                "voter_count": len(rows),
+                "voter_serial_numbers": ", ".join(rows["serial_number"].astype(str)),
+            }
+        )
+    return pd.DataFrame(households, columns=UNMAPPED_HOUSEHOLD_COLUMNS)
+
+
 def build_apartment_voter_rows(
     voters: pd.DataFrame,
     roster_rows: pd.DataFrame,
     roster: dict[tuple[str, str], list[dict[str, object]]],
     config: ApartmentConfig,
-) -> tuple[pd.DataFrame, set[tuple[str, str]]]:
-    """Return the output voter rows and the (unit, roster name key) pairs they are connected through."""
+) -> tuple[pd.DataFrame, set[tuple[str, str]], pd.DataFrame]:
+    """Return voter rows, connected (unit, roster name key) pairs, and unmapped household groups."""
     usable = voters.copy()
     identity_usable = voters.copy()
     number_only_groups = {
@@ -1519,7 +1562,17 @@ def build_apartment_voter_rows(
     out = collapse_unresolved_group_records(out)
     connected: set[tuple[str, str]] = set()
     if out.empty:
-        return pd.DataFrame(columns=OUTPUT_COLUMNS), connected
+        return (
+            pd.DataFrame(columns=OUTPUT_COLUMNS),
+            connected,
+            pd.DataFrame(columns=UNMAPPED_HOUSEHOLD_COLUMNS),
+        )
+    unmapped_households = summarize_unmapped_households(
+        unmapped_rows,
+        voters,
+        out.loc[out["apartment_unit"].ne(""), "_row_id"],
+        config,
+    )
     # A row's connection names are roster people in that row's own unit.
     connected = {
         (str(unit), connection_name_key(name))
@@ -1534,7 +1587,7 @@ def build_apartment_voter_rows(
     out["part_name_match"] = out["part_name_match"].astype("Int64")
     out["name_match_pct"] = out["name_match_pct"].astype("Int64")
     out["other_hh_matched_booth"] = other_households_matched_at_booth(out)
-    return out[OUTPUT_COLUMNS], connected
+    return out[OUTPUT_COLUMNS], connected, unmapped_households
 
 
 def other_households_matched_at_booth(out: pd.DataFrame) -> pd.Series:
@@ -1589,13 +1642,34 @@ def format_sheet(sheet, frame: pd.DataFrame) -> None:
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
     for position, column in enumerate(frame.columns, start=1):
+        letter = get_column_letter(position)
         lengths = [len(str(column)), *(len(str(value)) for value in frame[column].dropna())]
-        sheet.column_dimensions[get_column_letter(position)].width = min(max(lengths) + 2, MAX_EXCEL_COLUMN_WIDTH)
+        width = min(max(lengths) + 2, MAX_EXCEL_COLUMN_WIDTH)
+        if sheet.title == UNMAPPED_HOUSEHOLDS_SHEET:
+            width = max(width, len(column) + 5)
+            # Keep long addresses and polling-station names readable within the width cap.
+            for cell in sheet[letter][1:]:
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+                lines = wrap(str(cell.value or ""), width=width - 4)
+                if len(lines) > 1:
+                    row = sheet.row_dimensions[cell.row]
+                    row.height = max(row.height or 15, 15 * len(lines))
+        sheet.column_dimensions[letter].width = width
 
 
-def write_output_workbook(destination: Path, voter_rows: pd.DataFrame, roster_not_matched: pd.DataFrame) -> None:
+def write_output_workbook(
+    destination: Path,
+    voter_rows: pd.DataFrame,
+    roster_not_matched: pd.DataFrame,
+    unmapped_households: pd.DataFrame,
+) -> None:
+    sheets = (
+        (VOTERS_SHEET, voter_rows),
+        (ROSTER_NOT_MATCHED_SHEET, roster_not_matched),
+        (UNMAPPED_HOUSEHOLDS_SHEET, unmapped_households),
+    )
     with pd.ExcelWriter(destination, engine="openpyxl") as writer:
-        for sheet_name, frame in ((VOTERS_SHEET, voter_rows), (ROSTER_NOT_MATCHED_SHEET, roster_not_matched)):
+        for sheet_name, frame in sheets:
             frame = excel_ready(frame)
             frame.to_excel(writer, sheet_name=sheet_name, index=False)
             format_sheet(writer.sheets[sheet_name], frame)
@@ -1614,10 +1688,10 @@ def run_one(
     voters["_row_id"] = range(len(voters))
     voters = build_address_fields(voters, roster_rows, config)
     voters = matcher.assign_households(voters)
-    out, connected = build_apartment_voter_rows(voters, roster_rows, roster, config)
+    out, connected, unmapped_households = build_apartment_voter_rows(voters, roster_rows, roster, config)
     not_matched = roster_rows_not_matched(source_rows, roster_rows, connected)
     output_xlsx.parent.mkdir(parents=True, exist_ok=True)
-    write_output_workbook(output_xlsx, out, not_matched)
+    write_output_workbook(output_xlsx, out, not_matched, unmapped_households)
     print(f"{config.key}: rows: {len(out)}")
     if not out.empty:
         print(out["apartment_status"].value_counts().to_string())
@@ -1630,8 +1704,9 @@ def run_one(
             f"{int(out['voter_link_type'].str.contains('explicit_apartment_address', regex=False).sum())}"
         )
     print(f"roster_rows_not_matched: {len(not_matched)}")
+    print(f"unmapped_households: {len(unmapped_households)}")
     print(f"output_xlsx: {output_xlsx}")
-    return apartment_run_summary(config, roster_rows, out, not_matched, output_xlsx)
+    return apartment_run_summary(config, roster_rows, out, not_matched, unmapped_households, output_xlsx)
 
 
 def household_count(rows: pd.DataFrame) -> int:
@@ -1671,6 +1746,7 @@ def apartment_run_summary(
     roster_rows: pd.DataFrame,
     output_rows: pd.DataFrame,
     roster_not_matched: pd.DataFrame,
+    unmapped_households: pd.DataFrame,
     output_xlsx: Path,
 ) -> dict[str, object]:
     identity_rows = output_rows[
@@ -1686,6 +1762,7 @@ def apartment_run_summary(
         "roster_rows": int(len(roster_rows)),
         "roster_households": int(roster_rows["unit"].nunique()),
         "roster_rows_not_matched": int(len(roster_not_matched)),
+        "unmapped_households": len(unmapped_households),
         "output_rows": int(len(output_rows)),
         "output_households": household_count(output_rows),
         "headline_match_rows": int(len(identity_rows)),
