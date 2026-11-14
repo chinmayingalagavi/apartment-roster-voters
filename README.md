@@ -57,25 +57,24 @@ The apartment list CSV tells the script which apartments to run and where their 
 It should have these columns:
 
 ```text
-key,apartment_name,roster_path,keywords,extra_filler_terms
+key,apartment_name,roster_path,extra_filler_terms
 ```
 
 | column | meaning |
 |---|---|
 | `key` | Short apartment key. Use it to select an apartment on the command line. |
-| `apartment_name` | Apartment name written to the output. |
+| `apartment_name` | Apartment name written to the output and used to recognize the development in voter addresses. |
 | `roster_path` | Path to the source roster workbook or CSV. Relative paths are read relative to the apartment list CSV. |
-| `keywords` | Semicolon-separated phrases that identify this apartment in voter addresses. Use only the full apartment name and full-length misspellings of it. Do not add single words from the name, shortened forms, or anything that could name another place: a word like `classic` or `oasis` also matches other developments. |
 | `extra_filler_terms` | Optional semicolon-separated address words to ignore while parsing unit numbers. These terms do not identify the apartment by themselves. |
 
 Example row:
 
 ```csv
-key,apartment_name,roster_path,keywords,extra_filler_terms
-sample_residency,Sample Residency,sample_residency.xlsx,sample residency;sampel residency,PHASE
+key,apartment_name,roster_path,extra_filler_terms
+sample_residency,Sample Residency,sample_residency.xlsx,PHASE
 ```
 
-Do not put another apartment's name in `keywords` or `extra_filler_terms`.
+The address matcher recognizes the configured apartment name after normalizing case, punctuation, and spacing. A voter can also match through a flat number and roster name when the development name is absent from the address.
 
 ## Source roster formats
 

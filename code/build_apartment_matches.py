@@ -3,6 +3,7 @@
 """Build an Excel workbook per apartment from a voter-list CSV and a source roster in Excel or CSV.
 
 Read apartment settings from data/apartments.csv and standardize source rosters in memory.
+Recognize the configured apartment name in voter addresses.
 The workbook lists assigned voters, unassigned voters alongside households without a unit
 link, and roster rows that no voter row is connected through.
 Relation and household links require a voter directly matched to the same flat.
@@ -170,7 +171,6 @@ APARTMENT_CONFIG_REQUIRED_COLUMNS = [
     "key",
     "apartment_name",
     "roster_path",
-    "keywords",
 ]
 
 APARTMENT_CONFIG_OPTIONAL_COLUMNS = [
@@ -215,7 +215,6 @@ class ApartmentConfig:
     key: str
     apartment_name: str
     roster_path: Path
-    keywords: tuple[str, ...]
     extra_filler_terms: tuple[str, ...] = ()
 
 
@@ -264,7 +263,6 @@ def load_apartment_configs(apartments_csv: Path) -> dict[str, ApartmentConfig]:
         key = matcher.normalize_space(row["key"])
         apartment_name = matcher.normalize_space(row["apartment_name"])
         roster_path_text = matcher.normalize_space(row["roster_path"])
-        keywords = split_config_terms(row["keywords"])
         extra_filler_terms = split_config_terms(row["extra_filler_terms"])
 
         missing_values = []
@@ -274,8 +272,6 @@ def load_apartment_configs(apartments_csv: Path) -> dict[str, ApartmentConfig]:
             missing_values.append("apartment_name")
         if not roster_path_text:
             missing_values.append("roster_path")
-        if not keywords:
-            missing_values.append("keywords")
         if missing_values:
             raise SystemExit(
                 f"{apartments_csv} row {display_row_number} is missing: {', '.join(missing_values)}"
@@ -287,7 +283,6 @@ def load_apartment_configs(apartments_csv: Path) -> dict[str, ApartmentConfig]:
             key=key,
             apartment_name=apartment_name,
             roster_path=resolve_config_path(roster_path_text, base_dir),
-            keywords=keywords,
             extra_filler_terms=extra_filler_terms,
         )
 
@@ -388,7 +383,7 @@ def normalize_address_for_units(value: object) -> str:
 
 def filler_re_for_config(config: ApartmentConfig, valid_blocks: set[str]) -> re.Pattern[str]:
     terms: list[str] = []
-    for term in (*COMMON_ADDRESS_FILLERS, *config.keywords, *config.extra_filler_terms):
+    for term in (*COMMON_ADDRESS_FILLERS, config.apartment_name, *config.extra_filler_terms):
         normalized = matcher.normalize_address(term)
         if normalized in valid_blocks:
             continue
@@ -767,7 +762,7 @@ def normalize_roster(config: ApartmentConfig, source_rows: pd.DataFrame) -> pd.D
 
 
 def build_address_fields(voters: pd.DataFrame, roster_rows: pd.DataFrame, config: ApartmentConfig) -> pd.DataFrame:
-    label_re = compile_terms_re(config.keywords)
+    label_re = compile_terms_re((config.apartment_name,))
     valid_units = set(roster_rows["unit"])
     valid_blocks = {block for block in roster_rows["block"].astype(str).unique() if block}
     block_aliases = build_block_aliases(valid_blocks)
