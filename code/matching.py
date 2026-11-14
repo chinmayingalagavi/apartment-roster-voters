@@ -7,7 +7,8 @@ from __future__ import annotations
 import difflib
 import re
 from dataclasses import dataclass
-from typing import Iterable
+from functools import lru_cache
+from typing import Iterable, Sequence
 
 import pandas as pd
 
@@ -128,8 +129,10 @@ def is_initial_bundle(raw_token: str) -> bool:
     return vowels == 0
 
 
-def tokenize_name(value: object) -> list[NameToken]:
-    raw = str(value) if pd.notna(value) else ""
+@lru_cache(maxsize=32768)
+def tokenize_name(value: object) -> tuple[NameToken, ...]:
+    """Split a name into immutable tokens for repeated comparisons."""
+    raw = "" if pd.isna(value) else str(value)
     pieces_raw = re.sub(r"[^A-Za-z0-9]+", " ", raw).split()
     pieces = [(piece, piece.lower()) for piece in pieces_raw if piece.lower() not in HONORIFICS]
     tokens: list[NameToken] = []
@@ -139,9 +142,10 @@ def tokenize_name(value: object) -> list[NameToken]:
         is_initial = len(piece) == 1 and piece.isalpha()
         bundle_letters = tuple(piece) if is_initial_bundle(raw_piece) else ()
         tokens.append(NameToken(piece, index, is_initial, bundle_letters))
-    return tokens
+    return tuple(tokens)
 
 
+@lru_cache(maxsize=65536)
 def token_match_score(left: str, right: str) -> float | None:
     """Similarity of two name words if they count as the same word, else None."""
     if len(left) <= 1 or len(right) <= 1:
@@ -181,21 +185,21 @@ def is_full_word_candidate(token: NameToken) -> bool:
     return len(token.text) > 1 and not token.bundle_letters
 
 
-def is_mononym(tokens: list[NameToken]) -> bool:
+def is_mononym(tokens: Sequence[NameToken]) -> bool:
     return len(tokens) == 1 and is_full_word_candidate(tokens[0])
 
 
-def full_word_tokens(tokens: list[NameToken]) -> list[NameToken]:
+def full_word_tokens(tokens: Sequence[NameToken]) -> list[NameToken]:
     return [token for token in tokens if is_full_word_candidate(token)]
 
 
-def has_single_full_word(tokens: list[NameToken]) -> bool:
+def has_single_full_word(tokens: Sequence[NameToken]) -> bool:
     return len(full_word_tokens(tokens)) == 1
 
 
 def single_side_short_name_containment_pair(
-    left_tokens: list[NameToken],
-    right_tokens: list[NameToken],
+    left_tokens: Sequence[NameToken],
+    right_tokens: Sequence[NameToken],
 ) -> tuple[int, int, str, str, str] | None:
     left_single = has_single_full_word(left_tokens)
     right_single = has_single_full_word(right_tokens)
@@ -224,6 +228,7 @@ def whole_name_compact(value: object) -> str:
     return "".join(whole_name_words(value))
 
 
+@lru_cache(maxsize=65536)
 def whole_name_rule_match(left: object, right: object) -> NameMatch:
     left_norm = whole_name_normalized(left)
     right_norm = whole_name_normalized(right)
@@ -297,6 +302,7 @@ def single_word_name_matches(left: object, right: object) -> list[tuple[str, str
     return matches
 
 
+@lru_cache(maxsize=65536)
 def compare_names(left: object, right: object) -> NameMatch:
     left_tokens = tokenize_name(left)
     right_tokens = tokenize_name(right)
@@ -393,7 +399,7 @@ def relation_identifies_voter(relation_name: object, voter_name: object) -> bool
     return relation_words == voter_words or first_identity_anchor_matches(relation_name, voter_name)
 
 
-def leading_initial_letters(tokens: list[NameToken]) -> tuple[str, ...]:
+def leading_initial_letters(tokens: Sequence[NameToken]) -> tuple[str, ...]:
     letters: list[str] = []
     for token in tokens:
         if is_full_word_candidate(token):
