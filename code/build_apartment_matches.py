@@ -10,6 +10,7 @@ Two people linked on the voter roll can corroborate each other's roster matches.
 Rank competing voter records for each roster person by name score and booth support.
 Shade mapped rows by match confidence and separate flats with dark borders.
 Use the name that produced the similarity score for the confidence word count.
+Keep review rows only when the linked voter's own-name score is above 70%.
 """
 
 from __future__ import annotations
@@ -93,6 +94,7 @@ UNMAPPED_HOUSEHOLD_COLUMNS = [
     "voter_serial_numbers",
 ]
 MAX_EXCEL_COLUMN_WIDTH = 50
+LOW_CONFIDENCE = "Below review cutoff"
 CONFIDENCE_COLORS = {
     "Strong": "FFDCEFE0",
     "Probable": "FFDEECF9",
@@ -911,8 +913,8 @@ def percent(score: float | None) -> int | None:
     return None if score is None else round(100 * score)
 
 
-# (priority, full-name match %, part-name match %, roster name, multiple full words in scored name)
-ConnectionCandidate = tuple[int, int | None, int | None, str, bool]
+# (priority, full-name match %, part-name match %, roster name, multiple full words, linked voter match %)
+ConnectionCandidate = tuple[int, int | None, int | None, str, bool, int | None]
 
 
 def has_multiple_name_words(name: object) -> bool:
@@ -930,13 +932,15 @@ def connection_candidates(record: dict[str, object]) -> list[ConnectionCandidate
     if not_relation:
         person_hits = not_relation
     for hit in person_hits:
+        score = matcher.name_match_percent(hit["voter_name"], hit["roster_name"])
         candidates.append(
             (
                 CONNECTION_PRIORITY_VOTER_NAME,
-                matcher.name_match_percent(hit["voter_name"], hit["roster_name"]),
+                score,
                 percent(hit.get("part_score")),
                 str(hit["roster_name"]),
                 has_multiple_name_words(hit["voter_name"]),
+                score,
             )
         )
     for hit in record["relation_hits"]:
@@ -947,6 +951,7 @@ def connection_candidates(record: dict[str, object]) -> list[ConnectionCandidate
                 percent(hit.get("part_score")),
                 str(hit["roster_name"]),
                 has_multiple_name_words(hit["relation_name"]),
+                hit["linked_voter_name_match_pct"],
             )
         )
     for link in record["member_links"]:
@@ -959,44 +964,48 @@ def connection_candidates(record: dict[str, object]) -> list[ConnectionCandidate
                     link.get("anchor_connection_part_pct"),
                     str(roster_name),
                     link["anchor_match_has_multiple_words"],
+                    link.get("anchor_connection_pct"),
                 )
             )
     return candidates
 
 
-def select_connection(candidates: list[ConnectionCandidate]) -> tuple[list[str], int | None, int | None, bool]:
-    """Pick the roster person(s) a row is connected through, with the full-name and part-name match %.
+def select_connection(candidates: list[ConnectionCandidate]) -> tuple[list[str], int | None, int | None, bool, int | None]:
+    """Pick the row's roster connections and carry their name scores.
 
     The voter's own name match wins over a relation-name match, which wins over a
     household-member link. Within that, the highest full-name match % wins; equal scores are
-    all kept. The word-count flag comes from the selected match evidence.
+    all kept. The word-count flag and linked voter's score use the same selected evidence.
     """
     if not candidates:
-        return [], None, None, False
+        return [], None, None, False, None
     best_priority = min(candidate[0] for candidate in candidates)
     top = [candidate for candidate in candidates if candidate[0] == best_priority]
-    scores = [pct for _, pct, _, _, _ in top if pct is not None]
+    scores = [pct for _, pct, _, _, _, _ in top if pct is not None]
     best_pct = max(scores) if scores else None
     names: list[str] = []
     part_pcts: list[int] = []
+    linked_voter_pcts: list[int] = []
     has_multiple_words = False
     seen_keys: set[str] = set()
-    for _, pct, part_pct, roster_name, multiple_words in top:
+    for _, pct, part_pct, roster_name, multiple_words, linked_voter_pct in top:
         if pct != best_pct:
             continue
         if part_pct is not None:
             part_pcts.append(part_pct)
+        if linked_voter_pct is not None:
+            linked_voter_pcts.append(linked_voter_pct)
         has_multiple_words |= multiple_words
         key = connection_name_key(roster_name)
         if key not in seen_keys:
             seen_keys.add(key)
             names.append(roster_name)
-    return names, best_pct, (max(part_pcts) if part_pcts else None), has_multiple_words
+    return names, best_pct, max(part_pcts, default=None), has_multiple_words, max(linked_voter_pcts, default=None)
 
 
 def anchor_connection(anchor_record: dict[str, object]) -> dict[str, object]:
     """The roster connection and match % of the voter a household member is linked through."""
-    names, pct, part_pct, has_multiple_words = select_connection(connection_candidates(anchor_record))
+    names, pct, part_pct, has_multiple_words, _ = select_connection(connection_candidates(anchor_record))
     return {
         "anchor_connection_names": names,
         "anchor_connection_pct": pct,
@@ -1242,13 +1251,14 @@ def base_output_record(voter: pd.Series, config: ApartmentConfig) -> dict[str, o
 
 
 def set_connection_fields(record: dict[str, object], candidates: list[ConnectionCandidate]) -> None:
-    names, pct, part_pct, has_multiple_words = select_connection(candidates)
+    names, pct, part_pct, has_multiple_words, linked_voter_pct = select_connection(candidates)
     record["apartment_connection"] = "; ".join(names)
     record["part_name_match"] = part_pct
     record["name_match_pct"] = pct
     record["_connection_candidates"] = candidates
     record["_connection_names"] = names
     record["_match_has_multiple_words"] = has_multiple_words
+    record["_linked_voter_name_match_pct"] = linked_voter_pct
 
 
 def collapse_unresolved_group_records(out: pd.DataFrame) -> pd.DataFrame:
@@ -1381,7 +1391,8 @@ def match_confidence(out: pd.DataFrame, voters: pd.DataFrame, apartment_name: st
         | exact_apartment
         | pd.Series(corroborated, index=out.index, dtype=bool)
     )
-    confidence = pd.Series("Needs review", index=out.index)
+    confidence = pd.Series(LOW_CONFIDENCE, index=out.index)
+    confidence.loc[out["_linked_voter_name_match_pct"].gt(70)] = "Needs review"
     confidence.loc[scores.eq(100) | (scores.gt(75) & booth_counts.ge(3))] = "Probable"
     confidence.loc[strong] = "Strong"
     return confidence
@@ -1552,7 +1563,8 @@ def build_apartment_voter_rows(
             record["person_hits"] = kept_hits
 
     # Count booth support once with all candidates present, so pruning cannot change its own rankings.
-    out, unmapped_rows = resolve_voter_links(voters, roster_rows, config, unit_evidence, same_address_groups, {})
+    discarded = {}
+    out, unmapped_rows = resolve_voter_links(voters, roster_rows, config, unit_evidence, same_address_groups, discarded)
     if not out.empty:
         booth_units = matched_units_at_booth(out)
         out["other_hh_matched_booth"] = other_households_matched_at_booth(out, booth_units)
@@ -1565,6 +1577,22 @@ def build_apartment_voter_rows(
             )
             if not out.empty:
                 out["other_hh_matched_booth"] = other_households_matched_at_booth(out, booth_units)
+
+    # Recheck links after dropping their low-confidence anchors, keeping booth support fixed.
+    excluded_links: set[tuple[int, str]] = set()
+    while not out.empty:
+        out["_match_confidence"] = match_confidence(out, voters, config.apartment_name)
+        below_cutoff = out["apartment_unit"].ne("") & out["_match_confidence"].eq(LOW_CONFIDENCE)
+        if not below_cutoff.any():
+            break
+        excluded_links.update(zip(out.loc[below_cutoff, "_row_id"], out.loc[below_cutoff, "apartment_unit"]))
+        original_links = set(zip(out["_row_id"], out["apartment_unit"])) - excluded_links
+        out, unmapped_rows = resolve_voter_links(
+            voters, roster_rows, config, unit_evidence, same_address_groups, discarded,
+            original_links=original_links, excluded_links=excluded_links,
+        )
+        if not out.empty:
+            out["other_hh_matched_booth"] = other_households_matched_at_booth(out, booth_units)
 
     connected: set[tuple[str, str]] = set()
     if out.empty:
@@ -1590,7 +1618,6 @@ def build_apartment_voter_rows(
     out = out.sort_values(sort_cols).reset_index(drop=True)
     out["part_name_match"] = out["part_name_match"].astype("Int64")
     out["name_match_pct"] = out["name_match_pct"].astype("Int64")
-    out["_match_confidence"] = match_confidence(out, voters, config.apartment_name)
     return out[[*OUTPUT_COLUMNS, "_match_confidence"]], connected, unmapped_households
 
 
@@ -1602,8 +1629,10 @@ def resolve_voter_links(
     same_address_groups: dict[str, pd.DataFrame],
     discarded: dict[tuple[int, str], set[str]],
     original_links: set[tuple[int, str]] | None = None,
+    excluded_links: set[tuple[int, str]] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build output rows using only the direct matches still eligible to support other voters."""
+    excluded_links = excluded_links or set()
     unit_evidence = {
         (unit, status): {
             row_id: {
@@ -1616,6 +1645,7 @@ def resolve_voter_links(
                 ],
             }
             for row_id, record in evidence.items()
+            if (row_id, unit) not in excluded_links
         }
         for (unit, status), evidence in unit_evidence.items()
     }
@@ -1632,7 +1662,7 @@ def resolve_voter_links(
         if "anchor_voter_row_id" not in hit
     }
     direct_row_ids: set[int] = set()
-    linked_people: dict[tuple[str, int], dict[int, object]] = {}
+    linked_people: dict[tuple[str, int], dict[int, tuple[object, int | None]]] = {}
     for (unit, _), evidence_by_row in unit_evidence.items():
         for row_id, record in evidence_by_row.items():
             record["person_hits"] = [
@@ -1642,7 +1672,10 @@ def resolve_voter_links(
             ]
             for hit in record["person_hits"]:
                 direct_row_ids.add(row_id)
-                linked_people.setdefault((unit, hit["roster_row_id"]), {})[row_id] = hit["voter_name"]
+                linked_people.setdefault((unit, hit["roster_row_id"]), {})[row_id] = (
+                    hit["voter_name"],
+                    matcher.name_match_percent(hit["voter_name"], hit["roster_name"]),
+                )
 
     # A relation must identify a different voter whose own name links that person to this flat.
     relation_units: dict[int, set[str]] = {}
@@ -1651,14 +1684,19 @@ def resolve_voter_links(
             if original_links is not None and (row_id, unit) not in original_links:
                 record["relation_hits"] = []
                 continue
-            record["relation_hits"] = [
-                hit for hit in record["relation_hits"]
-                if any(
-                    other_row_id != row_id
-                    and matcher.relation_identifies_voter(hit["relation_name"], voter_name)
-                    for other_row_id, voter_name in linked_people.get((unit, hit["roster_row_id"]), {}).items()
-                )
-            ]
+            relation_hits = []
+            for hit in record["relation_hits"]:
+                people = linked_people.get((unit, hit["roster_row_id"]), {})
+                scores = [
+                    score for other_row_id, (voter_name, score) in people.items()
+                    if other_row_id != row_id and matcher.relation_identifies_voter(hit["relation_name"], voter_name)
+                ]
+                if scores:
+                    relation_hits.append({
+                        **hit,
+                        "linked_voter_name_match_pct": max((score for score in scores if score is not None), default=None),
+                    })
+            record["relation_hits"] = relation_hits
             if record["relation_hits"] and row_id not in direct_row_ids:
                 relation_units.setdefault(row_id, set()).add(unit)
 

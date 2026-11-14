@@ -213,7 +213,7 @@ Strong matches meet any of these conditions:
 - Two linked people on the voter roll each match a different roster person in the unit. The light green fill also applies to their mapped household group.
 - The voter address contains the configured apartment name after normalizing case, punctuation, and spacing.
 
-Among the remaining rows, a match is probable when `name_match_pct` is 100, or when it is above 75 and `other_hh_matched_booth` is at least 3. All other mapped rows need review.
+Among the remaining rows, a match is probable when `name_match_pct` is 100, or when it is above 75 and `other_hh_matched_booth` is at least 3. Other links are shown in light grey only when the directly linked voter's own-name score against the roster is above 70%. After this filter, a dependent link still requires a retained own-name match at the same flat.
 
 The word count uses the voter's own name for direct matches, the recorded relative's name for relation matches, and the linked voter's name for household-member matches. Initials do not count as full words.
 
