@@ -216,7 +216,7 @@ Among the remaining rows, a match is probable when `name_match_pct` is 100, or w
 
 The word count uses the voter's own name for direct matches, the recorded relative's name for relation matches, and the linked voter's name for household-member matches. Initials do not count as full words.
 
-The four apartment and flat columns come first, followed by `strength` in column E and the voter-list details. The last six columns show roster status, roster connection, part-name score, full-name score, other households matched at the booth, and link type.
+The first five columns show the apartment, flat, match strength, voter name, and linked roster name (`apartment_connection`). The remaining voter details come next, followed by roster status, the three match scores, and link type. The block and unit part are the last two columns.
 
 | column | meaning |
 |---|---|

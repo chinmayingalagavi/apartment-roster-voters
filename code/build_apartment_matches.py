@@ -79,7 +79,17 @@ VOTER_DETAIL_COLUMNS = [
     *[column for column in VOTER_OUTPUT_COLUMNS if column not in VOTER_NAME_COLUMNS],
 ]
 OUTPUT_COLUMNS = [*APARTMENT_UNIT_COLUMNS, *MATCH_DETAIL_COLUMNS, *VOTER_DETAIL_COLUMNS]
-MAPPED_OUTPUT_COLUMNS = [*APARTMENT_UNIT_COLUMNS, "strength", *VOTER_DETAIL_COLUMNS, *MATCH_DETAIL_COLUMNS]
+MAPPED_OUTPUT_COLUMNS = [
+    "apartment",
+    "apartment_unit",
+    "strength",
+    "voter_name",
+    "apartment_connection",
+    *[column for column in VOTER_DETAIL_COLUMNS if column != "voter_name"],
+    *[column for column in MATCH_DETAIL_COLUMNS if column != "apartment_connection"],
+    "apartment_block",
+    "apartment_unit_part",
+]
 
 # Workbook sheets and columns for the household-level address report.
 VOTERS_SHEET = "voters_mapped_tohouse"
