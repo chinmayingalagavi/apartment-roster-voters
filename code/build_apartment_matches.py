@@ -1481,8 +1481,10 @@ def build_apartment_voter_rows(
         out["other_hh_matched_booth"] = other_households_matched_at_booth(out, booth_units)
         discarded = dominated_voter_links(out)
         if discarded:
+            original_links = set(zip(out["_row_id"], out["apartment_unit"]))
             out, unmapped_rows = resolve_voter_links(
                 voters, roster_rows, config, unit_evidence, same_address_groups, discarded,
+                original_links=original_links,
             )
             if not out.empty:
                 out["other_hh_matched_booth"] = other_households_matched_at_booth(out, booth_units)
@@ -1521,6 +1523,7 @@ def resolve_voter_links(
     unit_evidence: dict[tuple[str, str], dict[int, dict[str, object]]],
     same_address_groups: dict[str, pd.DataFrame],
     discarded: dict[tuple[int, str], set[str]],
+    original_links: set[tuple[int, str]] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build output rows using only the direct matches still eligible to support other voters."""
     unit_evidence = {
@@ -1567,6 +1570,9 @@ def resolve_voter_links(
     relation_units: dict[int, set[str]] = {}
     for (unit, _), evidence_by_row in unit_evidence.items():
         for row_id, record in evidence_by_row.items():
+            if original_links is not None and (row_id, unit) not in original_links:
+                record["relation_hits"] = []
+                continue
             record["relation_hits"] = [
                 hit for hit in record["relation_hits"]
                 if any(
@@ -1600,6 +1606,8 @@ def resolve_voter_links(
             for _, voter in group_rows.iterrows():
                 row_id = int(voter["_row_id"])
                 if row_id in evidence_by_row or row_id in direct_row_ids or (row_id, unit) in discarded:
+                    continue
+                if original_links is not None and (row_id, unit) not in original_links:
                     continue
                 if unit not in matcher.voter_candidate_units(voter["candidate_units"]):
                     continue
@@ -1662,6 +1670,8 @@ def resolve_voter_links(
                 continue
             row_unit_key = (int(voter["_row_id"]), unit)
             if row_unit_key in emitted_row_unit_keys or row_unit_key in discarded:
+                continue
+            if original_links is not None and row_unit_key not in original_links:
                 continue
             item = {
                 "voter": voter,

@@ -299,7 +299,7 @@ If an address points to multiple possible units, name or relation evidence can c
 
 Two distinct voters can confirm a flat when each independently matches a different roster person there. The voter roll must link them through a recorded relation or through the same address in the same voter-roll household group. An unambiguous pair reserves those voter and roster matches within the apartment. Other people at the flat can still match through the usual rules. When pairs compete, a recorded relation takes priority, followed by a shared address within the same household group. Equally supported alternatives follow the usual matching rules.
 
-For each roster person in a flat, an own-name candidate is kept if at most one other distinct voter record is at least as high on both full-name similarity and booth support and strictly higher on one. Equal scores on both measures stay tied. Booth support is counted once before filtering. Relation and household links are rebuilt using the retained own-name matches.
+For each roster person in a flat, an own-name candidate is kept if at most one other distinct voter record is at least as high on both full-name similarity and booth support and strictly higher on one. Equal scores on both measures stay tied. Booth support is counted once before filtering. Existing household links must still have a retained own-name match to support them.
 
 ## Check After Edits
 
