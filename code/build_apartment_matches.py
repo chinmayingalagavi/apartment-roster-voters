@@ -2,8 +2,9 @@
 # AUTHOR: Chinmay and AI
 """Build an Excel workbook per apartment from voter and roster files in CSV or XLSX.
 
-Read the voter filename on the first row of the apartment list, followed by apartment names
-and roster filenames. Standardize source rosters in memory.
+Read the voter list name and filename on the first row of the apartment list, followed by
+apartment names and roster filenames. Standardize source rosters in memory and label each
+output row with the voter list searched.
 Recognize the configured apartment name in voter addresses.
 The workbook lists assigned voters, unassigned voters alongside households without a unit
 link, and roster rows that no voter row is connected through.
@@ -272,7 +273,7 @@ def resolve_config_path(value: object, base_dir: Path, default: Path | None = No
 
 def load_apartment_configs(apartments_csv: Path) -> dict[str, ApartmentConfig]:
     """Read apartment rows for callers that supply their own voter CSV."""
-    configs, _ = _load_apartment_run_config(apartments_csv)
+    configs, _, _ = _load_apartment_run_config(apartments_csv)
     return configs
 
 
@@ -287,8 +288,8 @@ def apartment_key(apartment_name: str) -> str:
     return ROSTER_LABEL_KEYS.get(slug, slug)
 
 
-def _read_apartment_list(path: Path) -> tuple[list[tuple[int, dict[str, str]]], Path | None]:
-    """Read the voter filename and apartment rows, or accept the earlier headed layout."""
+def _read_apartment_list(path: Path) -> tuple[list[tuple[int, dict[str, str]]], Path | None, str]:
+    """Read the voter list name and path, followed by apartment rows."""
     if not path.is_file():
         raise SystemExit(f"Apartment list not found: {path}")
 
@@ -305,15 +306,21 @@ def _read_apartment_list(path: Path) -> tuple[list[tuple[int, dict[str, str]]], 
     first = rows[0] if rows else []
     headed_layout = len(first) > 1 and any(column in first for column in APARTMENT_CONFIG_REQUIRED_COLUMNS)
     voter_file = None
+    searched_voter_list = ""
     if headed_layout:
         columns = first
         missing = [column for column in APARTMENT_CONFIG_REQUIRED_COLUMNS if column not in columns]
         if missing:
             raise SystemExit(f"{path} is missing required columns: {', '.join(missing)}")
     else:
-        if not first or not first[0].strip() or any(value.strip() for value in first[1:]):
-            raise SystemExit(f"{path} row 1 must contain the voter filename in the first cell")
-        voter_file = resolve_config_path(first[0], path.parent)
+        if not first or not first[0].strip() or any(value.strip() for value in first[2:]):
+            raise SystemExit(f"{path} row 1 must contain the voter list name and filename")
+        if len(first) > 1 and first[1].strip():
+            searched_voter_list = first[0].strip()
+            voter_file = resolve_config_path(first[1], path.parent)
+        else:
+            # Earlier setup files use only the voter filename in the first row.
+            voter_file = resolve_config_path(first[0], path.parent)
         columns = APARTMENT_CONFIG_REQUIRED_COLUMNS
 
     apartment_rows = []
@@ -325,12 +332,12 @@ def _read_apartment_list(path: Path) -> tuple[list[tuple[int, dict[str, str]]], 
         row = dict.fromkeys(columns, "")
         row.update(zip(columns, values))
         apartment_rows.append((row_number, row))
-    return apartment_rows, voter_file
+    return apartment_rows, voter_file, searched_voter_list
 
 
-def _load_apartment_run_config(apartments_csv: Path) -> tuple[dict[str, ApartmentConfig], Path | None]:
+def _load_apartment_run_config(apartments_csv: Path) -> tuple[dict[str, ApartmentConfig], Path | None, str]:
     """Resolve roster paths and the voter file relative to the apartment list."""
-    rows, voter_csv = _read_apartment_list(apartments_csv)
+    rows, voter_csv, searched_voter_list = _read_apartment_list(apartments_csv)
     base_dir = apartments_csv.parent
     configs: dict[str, ApartmentConfig] = {}
     for display_row_number, row in rows:
@@ -377,7 +384,7 @@ def _load_apartment_run_config(apartments_csv: Path) -> tuple[dict[str, Apartmen
 
     if not configs:
         raise SystemExit(f"{apartments_csv} does not contain any apartment rows")
-    return configs, voter_csv
+    return configs, voter_csv, searched_voter_list
 
 
 def compile_terms_re(terms: Iterable[str]) -> re.Pattern[str]:
@@ -2030,6 +2037,8 @@ def write_output_workbook(
     roster_not_matched: pd.DataFrame,
     unmapped_households: pd.DataFrame,
     unassigned_voters: pd.DataFrame,
+    *,
+    searched_voter_list: str = "",
 ) -> None:
     # Keep the household summary columns and retain the full record for each moved voter.
     household_summaries = unmapped_households.assign(apartment_status=UNMAPPED_STATUS)
@@ -2066,6 +2075,9 @@ def write_output_workbook(
                     display = frame.assign(strength=strength)[MAPPED_OUTPUT_COLUMNS]
                 else:
                     display = frame.assign(strength=strength)[UNMAPPED_OUTPUT_COLUMNS]
+            display = display.drop(columns="searched_voter_list", errors="ignore").assign(
+                searched_voter_list=searched_voter_list,
+            )
             display.to_excel(writer, sheet_name=sheet_name, index=False)
             sheet = writer.sheets[sheet_name]
             format_sheet(sheet, display)
@@ -2091,6 +2103,8 @@ def run_one(
     config: ApartmentConfig,
     voter_csv: Path,
     output_xlsx: Path,
+    *,
+    searched_voter_list: str = "",
 ) -> dict[str, object]:
     """Read the roster once, write the apartment workbook, and return its run summary."""
     source_rows = read_roster_source(config)
@@ -2105,7 +2119,10 @@ def run_one(
     is_unassigned = out["apartment_status"].eq(UNASSIGNED_STATUS)
     mapped_voters = out.loc[out["apartment_unit"].ne("") & ~is_unassigned]
     output_xlsx.parent.mkdir(parents=True, exist_ok=True)
-    write_output_workbook(output_xlsx, mapped_voters, not_matched, unmapped_households, out.loc[is_unassigned])
+    write_output_workbook(
+        output_xlsx, mapped_voters, not_matched, unmapped_households, out.loc[is_unassigned],
+        searched_voter_list=searched_voter_list,
+    )
     print(f"{config.key}: rows: {len(out)}")
     if not out.empty:
         print(out["apartment_status"].value_counts().to_string())
@@ -2210,6 +2227,8 @@ def write_run_log(
     voter_csv: Path,
     apartments_csv: Path,
     summaries: list[dict[str, object]],
+    *,
+    searched_voter_list: str = "",
 ) -> Path:
     generated_at = datetime.now().astimezone()
     log_dir = output_root / "log"
@@ -2219,9 +2238,10 @@ def write_run_log(
         "apartments_csv_columns": APARTMENT_CONFIG_COLUMNS,
         "individual_related_columns": INDIVIDUAL_RELATED_COLUMNS,
         "household_related_columns": HOUSEHOLD_RELATED_COLUMNS,
-        "voters_sheet_columns": MAPPED_OUTPUT_COLUMNS,
+        "voters_sheet_columns": [*MAPPED_OUTPUT_COLUMNS, "searched_voter_list"],
         "generated_at": generated_at.isoformat(timespec="seconds"),
         "voter_csv": path_for_log(voter_csv),
+        "searched_voter_list": searched_voter_list,
         "apartments_csv": path_for_log(apartments_csv),
         "apartments": summaries,
     }
@@ -2236,6 +2256,7 @@ def main() -> None:
     parser.add_argument("apartment", nargs="?", default="all")
     parser.add_argument("--apartments-file", "--apartments-csv", type=Path, help="apartment list in CSV or XLSX")
     parser.add_argument("--voter-file", "--voter-csv", type=Path, help="override the voter file from the apartment list")
+    parser.add_argument("--searched-voter-list", help="AC or ward name to show in the output")
     parser.add_argument("--output-xlsx", type=Path)
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
@@ -2246,8 +2267,14 @@ def main() -> None:
         apartments_file = DEFAULT_APARTMENTS_CSV
         if not apartments_file.exists() and apartments_xlsx.is_file():
             apartments_file = apartments_xlsx
-    configs, configured_voter_csv = _load_apartment_run_config(apartments_file)
+    configs, configured_voter_csv, searched_voter_list = _load_apartment_run_config(apartments_file)
     voter_csv = args.voter_file or configured_voter_csv or DEFAULT_VOTER_CSV
+    if args.searched_voter_list is not None:
+        searched_voter_list = args.searched_voter_list.strip()
+    elif args.voter_file is not None and (
+        configured_voter_csv is None or args.voter_file.resolve() != configured_voter_csv.resolve()
+    ):
+        searched_voter_list = ""
     if args.apartment != "all" and args.apartment not in configs:
         available = ", ".join(sorted(configs))
         raise SystemExit(f"Unknown apartment key: {args.apartment}. Available keys: {available}")
@@ -2260,10 +2287,15 @@ def main() -> None:
     output_root = args.output_dir or PROJECT_ROOT / "output"
     selected = configs.values() if args.apartment == "all" else (configs[args.apartment],)
     summaries = [
-        run_one(config, voter_csv, args.output_xlsx or output_root / f"{config.key}_voters.xlsx")
+        run_one(
+            config, voter_csv, args.output_xlsx or output_root / f"{config.key}_voters.xlsx",
+            searched_voter_list=searched_voter_list,
+        )
         for config in selected
     ]
-    log_path = write_run_log(output_root, voter_csv, apartments_file, summaries)
+    log_path = write_run_log(
+        output_root, voter_csv, apartments_file, summaries, searched_voter_list=searched_voter_list,
+    )
     print(f"run_log: {log_path}")
 
 
