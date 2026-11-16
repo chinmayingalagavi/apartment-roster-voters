@@ -14,6 +14,7 @@ Rank competing voter records for each roster person by name score and booth supp
 Show match strength in the voter sheets, shade voter rows, and separate flats with dark borders.
 Use the name that produced the similarity score for the confidence word count.
 Keep review rows only when the linked voter's own-name score is above 70%.
+Omit Needs review rows from the mapped sheet when the same flat has a Strong row there.
 """
 
 from __future__ import annotations
@@ -2117,12 +2118,18 @@ def run_one(
     out, connected, unmapped_households = build_apartment_voter_rows(voters, roster_rows, roster, config)
     not_matched = roster_rows_not_matched(source_rows, roster_rows, connected)
     is_unassigned = out["apartment_status"].eq(UNASSIGNED_STATUS)
-    mapped_voters = out.loc[out["apartment_unit"].ne("") & ~is_unassigned]
+    is_mapped = out["apartment_unit"].ne("") & ~is_unassigned
+    # Hide review rows only when a Strong match will appear for the same flat on the mapped sheet.
+    confidence = out["_match_confidence"]
+    strong_units = out.loc[is_mapped & confidence.eq("Strong"), "apartment_unit"]
+    suppress_review = is_mapped & confidence.eq("Needs review") & out["apartment_unit"].isin(strong_units)
+    mapped_voters = out.loc[is_mapped & ~suppress_review]
     output_xlsx.parent.mkdir(parents=True, exist_ok=True)
     write_output_workbook(
         output_xlsx, mapped_voters, not_matched, unmapped_households, out.loc[is_unassigned],
         searched_voter_list=searched_voter_list,
     )
+    out = out.loc[~suppress_review]
     print(f"{config.key}: rows: {len(out)}")
     if not out.empty:
         print(out["apartment_status"].value_counts().to_string())
