@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # AUTHOR: Chinmay and AI
-"""Build an Excel workbook per apartment from a voter-list CSV and a source roster in Excel or CSV.
+"""Build an Excel workbook per apartment from voter and roster files in CSV or XLSX.
 
-Read apartment settings from data/apartments.csv and standardize source rosters in memory.
+Read the voter filename on the first row of the apartment list, followed by apartment names
+and roster filenames. Standardize source rosters in memory.
 Recognize the configured apartment name in voter addresses.
 The workbook lists assigned voters, unassigned voters alongside households without a unit
 link, and roster rows that no voter row is connected through.
@@ -17,8 +18,10 @@ Keep review rows only when the linked voter's own-name score is above 70%.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
+import unicodedata
 from copy import copy
 from dataclasses import dataclass
 from datetime import datetime
@@ -37,6 +40,7 @@ import matching as matcher
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_APARTMENTS_CSV = PROJECT_ROOT / "data" / "apartments.csv"
 DEFAULT_VOTER_CSV = PROJECT_ROOT / "data" / "voters.csv"
+INPUT_FILE_EXTENSIONS = (".csv", ".xlsx")
 UNIT_PAD_WIDTH = 3
 
 VOTER_OUTPUT_COLUMNS = [
@@ -179,19 +183,31 @@ EXCEL_ROSTER_COLUMNS = {
     "silicon_oasis": {"Flat No.": "unit", "Name": "name", "Status": "status"},
 }
 
-APARTMENT_CONFIG_REQUIRED_COLUMNS = [
-    "key",
-    "apartment_name",
-    "roster_path",
-]
+KNOWN_APARTMENTS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "concorde": ("Concorde Midway", ("CITY",)),
+    "purnima": ("Purnima Classic", ()),
+    "silicon_oasis": ("Silicon Oasis", ("WING", "TOWER", "VILLA", "ROW")),
+    "tirumala_vintage": (
+        "Tirumala Vintage",
+        ("SRI", "SHRI", "APPARTMENT", "APPARTMENTS", "APPARTMEN", "APARTMEN", "APA"),
+    ),
+}
 
-APARTMENT_CONFIG_OPTIONAL_COLUMNS = [
-    "extra_filler_terms",
-]
+# Alternate labels select the same roster reader.
+ROSTER_LABEL_KEYS = {
+    "concorde_midway_city": "concorde",
+    "sobha_silicon_oasis": "silicon_oasis",
+    "sri_tirumala_vintage": "tirumala_vintage",
+    "shri_tirumala_vintage": "tirumala_vintage",
+}
+
+APARTMENT_CONFIG_REQUIRED_COLUMNS = ["apartment_name", "roster_path"]
 
 APARTMENT_CONFIG_COLUMNS = [
+    "key",
     *APARTMENT_CONFIG_REQUIRED_COLUMNS,
-    *APARTMENT_CONFIG_OPTIONAL_COLUMNS,
+    "extra_filler_terms",
+    "voter_csv",
 ]
 
 COMMON_ADDRESS_FILLERS = [
@@ -242,7 +258,7 @@ def split_config_terms(value: object) -> tuple[str, ...]:
 
 
 def resolve_config_path(value: object, base_dir: Path, default: Path | None = None) -> Path:
-    text = matcher.normalize_space(value)
+    text = str(value).strip()
     if not text:
         if default is not None:
             return default
@@ -255,31 +271,73 @@ def resolve_config_path(value: object, base_dir: Path, default: Path | None = No
 
 
 def load_apartment_configs(apartments_csv: Path) -> dict[str, ApartmentConfig]:
-    if not apartments_csv.exists():
-        raise SystemExit(f"Apartment list CSV not found: {apartments_csv}")
+    """Read apartment rows for callers that supply their own voter CSV."""
+    configs, _ = _load_apartment_run_config(apartments_csv)
+    return configs
 
-    rows = pd.read_csv(apartments_csv, dtype=str, keep_default_na=False)
-    missing_columns = [column for column in APARTMENT_CONFIG_REQUIRED_COLUMNS if column not in rows.columns]
-    if missing_columns:
-        raise SystemExit(
-            f"{apartments_csv} is missing required columns: {', '.join(missing_columns)}"
-        )
-    for column in APARTMENT_CONFIG_OPTIONAL_COLUMNS:
-        if column not in rows.columns:
-            rows[column] = ""
 
+def apartment_key(apartment_name: str) -> str:
+    """Use the existing key for a known apartment or form a key from its name."""
+    decomposed_name = unicodedata.normalize("NFKD", apartment_name)
+    name_without_accents = "".join(char for char in decomposed_name if not unicodedata.combining(char))
+    slug = re.sub(r"[^a-z0-9]+", "_", name_without_accents.lower()).strip("_")
+    for key, (name, _) in KNOWN_APARTMENTS.items():
+        if slug == name.lower().replace(" ", "_"):
+            return key
+    return ROSTER_LABEL_KEYS.get(slug, slug)
+
+
+def _read_apartment_list(path: Path) -> tuple[list[tuple[int, dict[str, str]]], Path | None]:
+    """Read the voter filename and apartment rows, or accept the earlier headed layout."""
+    if not path.is_file():
+        raise SystemExit(f"Apartment list not found: {path}")
+
+    try:
+        if path.suffix.lower() == ".xlsx":
+            sheet = pd.read_excel(path, header=None, dtype=str, keep_default_na=False)
+            rows = sheet.to_numpy().tolist()
+        else:
+            with path.open(encoding="utf-8-sig", newline="") as source:
+                rows = list(csv.reader(source, strict=True))
+    except (csv.Error, OSError, ValueError) as error:
+        raise SystemExit(f"Cannot read apartment list {path}: {error}") from error
+
+    first = rows[0] if rows else []
+    headed_layout = len(first) > 1 and any(column in first for column in APARTMENT_CONFIG_REQUIRED_COLUMNS)
+    voter_file = None
+    if headed_layout:
+        columns = first
+        missing = [column for column in APARTMENT_CONFIG_REQUIRED_COLUMNS if column not in columns]
+        if missing:
+            raise SystemExit(f"{path} is missing required columns: {', '.join(missing)}")
+    else:
+        if not first or not first[0].strip() or any(value.strip() for value in first[1:]):
+            raise SystemExit(f"{path} row 1 must contain the voter filename in the first cell")
+        voter_file = resolve_config_path(first[0], path.parent)
+        columns = APARTMENT_CONFIG_REQUIRED_COLUMNS
+
+    apartment_rows = []
+    for row_number, values in enumerate(rows[1:], start=2):
+        if not any(value.strip() for value in values):
+            continue
+        if not headed_layout and (len(values) < 2 or any(value.strip() for value in values[2:])):
+            raise SystemExit(f"{path} row {row_number} must contain an apartment name and roster filename")
+        row = dict.fromkeys(columns, "")
+        row.update(zip(columns, values))
+        apartment_rows.append((row_number, row))
+    return apartment_rows, voter_file
+
+
+def _load_apartment_run_config(apartments_csv: Path) -> tuple[dict[str, ApartmentConfig], Path | None]:
+    """Resolve roster paths and the voter file relative to the apartment list."""
+    rows, voter_csv = _read_apartment_list(apartments_csv)
     base_dir = apartments_csv.parent
     configs: dict[str, ApartmentConfig] = {}
-    for row_number, row in rows.iterrows():
-        display_row_number = int(row_number) + 2
-        key = matcher.normalize_space(row["key"])
+    for display_row_number, row in rows:
         apartment_name = matcher.normalize_space(row["apartment_name"])
-        roster_path_text = matcher.normalize_space(row["roster_path"])
-        extra_filler_terms = split_config_terms(row["extra_filler_terms"])
+        roster_path_text = row["roster_path"].strip()
 
         missing_values = []
-        if not key:
-            missing_values.append("key")
         if not apartment_name:
             missing_values.append("apartment_name")
         if not roster_path_text:
@@ -288,9 +346,20 @@ def load_apartment_configs(apartments_csv: Path) -> dict[str, ApartmentConfig]:
             raise SystemExit(
                 f"{apartments_csv} row {display_row_number} is missing: {', '.join(missing_values)}"
             )
+
+        key = matcher.normalize_space(row.get("key", "")) or apartment_key(apartment_name)
+        if not key:
+            raise SystemExit(f"{apartments_csv} row {display_row_number} needs a key for this apartment name")
         if key in configs:
             raise SystemExit(f"{apartments_csv} has duplicate key: {key}")
 
+        # Honor an explicit blank so a saved configuration can opt out of the preset fillers.
+        filler_terms = row.get("extra_filler_terms")
+        extra_filler_terms = (
+            split_config_terms(filler_terms)
+            if filler_terms is not None
+            else KNOWN_APARTMENTS.get(key, ("", ()))[1]
+        )
         configs[key] = ApartmentConfig(
             key=key,
             apartment_name=apartment_name,
@@ -298,9 +367,17 @@ def load_apartment_configs(apartments_csv: Path) -> dict[str, ApartmentConfig]:
             extra_filler_terms=extra_filler_terms,
         )
 
+        voter_csv_text = row.get("voter_csv", "").strip()
+        if voter_csv_text:
+            row_voter_csv = resolve_config_path(voter_csv_text, base_dir)
+            if voter_csv is not None and voter_csv.resolve() != row_voter_csv.resolve():
+                raise SystemExit(f"{apartments_csv} row {display_row_number} names a different voter CSV")
+            if voter_csv is None:
+                voter_csv = row_voter_csv
+
     if not configs:
         raise SystemExit(f"{apartments_csv} does not contain any apartment rows")
-    return configs
+    return configs, voter_csv
 
 
 def compile_terms_re(terms: Iterable[str]) -> re.Pattern[str]:
@@ -724,6 +801,9 @@ def read_roster_source(config: ApartmentConfig) -> pd.DataFrame:
             if config.key != "tirumala_vintage":
                 raise
             roster = pd.read_csv(path, dtype=str, keep_default_na=False, encoding="cp1252")
+
+        if "name" not in roster or not {"unit", "unit_part"}.intersection(roster.columns):
+            raise ValueError(f"{path} is missing expected roster columns: name and either unit or unit_part")
 
         tirumala_source_columns = {"unit", "block", "name", "status"}
         if (
@@ -1993,6 +2073,20 @@ def write_output_workbook(
                 shade_households(sheet, frame["_match_confidence"])
 
 
+def read_voter_source(path: Path, *, nrows: int | None = None) -> pd.DataFrame:
+    """Read a prepared voter table from CSV or the first worksheet in an XLSX file."""
+    if path.suffix.lower() == ".xlsx":
+        voters = pd.read_excel(path, nrows=nrows, dtype={"epic_number": str})
+    else:
+        voters = pd.read_csv(path, nrows=nrows)
+
+    required_columns = (set(VOTER_OUTPUT_COLUMNS) - {"voter_name"}) | {"name"}
+    missing = sorted(required_columns - set(voters.columns))
+    if missing:
+        raise ValueError(f"{path.name} is missing required voter columns: {', '.join(missing)}")
+    return voters
+
+
 def run_one(
     config: ApartmentConfig,
     voter_csv: Path,
@@ -2002,7 +2096,7 @@ def run_one(
     source_rows = read_roster_source(config)
     roster_rows = normalize_roster(config, source_rows)
     roster = roster_by_unit_group(roster_rows)
-    voters = pd.read_csv(voter_csv)
+    voters = read_voter_source(voter_csv)
     voters["_row_id"] = range(len(voters))
     voters = build_address_fields(voters, roster_rows, config)
     voters = matcher.assign_households(voters)
@@ -2140,13 +2234,20 @@ def write_run_log(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("apartment", nargs="?", default="all")
-    parser.add_argument("--apartments-csv", type=Path, default=DEFAULT_APARTMENTS_CSV)
-    parser.add_argument("--voter-csv", type=Path, default=DEFAULT_VOTER_CSV)
+    parser.add_argument("--apartments-file", "--apartments-csv", type=Path, help="apartment list in CSV or XLSX")
+    parser.add_argument("--voter-file", "--voter-csv", type=Path, help="override the voter file from the apartment list")
     parser.add_argument("--output-xlsx", type=Path)
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
 
-    configs = load_apartment_configs(args.apartments_csv)
+    apartments_file = args.apartments_file
+    if apartments_file is None:
+        apartments_xlsx = DEFAULT_APARTMENTS_CSV.with_suffix(".xlsx")
+        apartments_file = DEFAULT_APARTMENTS_CSV
+        if not apartments_file.exists() and apartments_xlsx.is_file():
+            apartments_file = apartments_xlsx
+    configs, configured_voter_csv = _load_apartment_run_config(apartments_file)
+    voter_csv = args.voter_file or configured_voter_csv or DEFAULT_VOTER_CSV
     if args.apartment != "all" and args.apartment not in configs:
         available = ", ".join(sorted(configs))
         raise SystemExit(f"Unknown apartment key: {args.apartment}. Available keys: {available}")
@@ -2159,10 +2260,10 @@ def main() -> None:
     output_root = args.output_dir or PROJECT_ROOT / "output"
     selected = configs.values() if args.apartment == "all" else (configs[args.apartment],)
     summaries = [
-        run_one(config, args.voter_csv, args.output_xlsx or output_root / f"{config.key}_voters.xlsx")
+        run_one(config, voter_csv, args.output_xlsx or output_root / f"{config.key}_voters.xlsx")
         for config in selected
     ]
-    log_path = write_run_log(output_root, args.voter_csv, args.apartments_csv, summaries)
+    log_path = write_run_log(output_root, voter_csv, apartments_file, summaries)
     print(f"run_log: {log_path}")
 
 

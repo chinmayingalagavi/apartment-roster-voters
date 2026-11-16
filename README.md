@@ -1,52 +1,43 @@
 # Apartment voter matching
 
-Run this Python script to match apartment rosters against a voter list and get one Excel workbook per apartment.
+Match a voter list against apartment rosters and get one Excel workbook per apartment.
 
-## 1. Add your files
+## Run from a terminal
 
-Install Python 3.10 or newer. Open a terminal in the repository folder, the one containing `code/`. Create a `data/` folder and put these files inside it. The input files are supplied separately from the repository.
-
-- **Constituency voter list** saved as `ac_voters.csv`. Use a prepared CSV with the header shown below.
-- **One roster per apartment** in Excel (`.xlsx`) or CSV. For a new apartment, use one row per person, with a `name` column and a `unit` column such as `B102`. You can also use `block` and `unit_part` instead of `unit`. The `status` column is optional.
-- **Apartment list** saved as `apartments.csv`. Use [the example](code/apartments.example.csv) as a template, with one row per apartment.
+Create a `data/` folder in this repository. Put the voter list and apartment rosters in it. Each file can be CSV or XLSX and can have any filename. Save the apartment list itself as `data/apartments.csv` or `data/apartments.xlsx`.
 
 ```csv
-key,apartment_name,roster_path
-sample_residency,Sample Residency,sample_residency.xlsx
+Bangalore South constituency.xlsx
+Sample Residency,Owners and tenants.xlsx
+Example Heights,Example residents.csv
 ```
 
-Use a unique short `key`, the full apartment name as it appears in voter addresses, and the roster filename. The script reads this list automatically. For the four original roster formats, use their existing keys `concorde`, `purnima`, `silicon_oasis`, and `tirumala_vintage`.
+Put the voter filename in the first cell of row 1. Starting on row 2, put the full apartment name from the voter addresses in column A and its roster filename in column B. Use the first worksheet for XLSX files. Relative paths start at the folder containing the apartment list. [CSV template](code/apartments.example.csv)
 
-The voter CSV needs these columns.
+Install Python 3.10 or newer. Open a terminal in this repository, then run the commands for your computer.
 
-```csv
-serial_number,epic_number,name,relation_type,relation_name,house_number,age,gender,section_raw,part,ward,corporation,pincode,pollingname,pollingaddress
-```
-
-## 2. Install and run
-
-On **Mac**, run these commands from the repository folder.
+**Mac**
 
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -r code/requirements.txt
-.venv/bin/python code/build_apartment_matches.py --voter-csv data/ac_voters.csv --output-dir output/ac
+.venv/bin/python code/build_apartment_matches.py
 ```
 
-On **Windows**, use PowerShell.
+**Windows PowerShell**
 
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r code/requirements.txt
-.\.venv\Scripts\python.exe code/build_apartment_matches.py --voter-csv data/ac_voters.csv --output-dir output/ac
+.\.venv\Scripts\python.exe code/build_apartment_matches.py
 ```
 
-Run just the last command after the first setup. To run one apartment, put its key after `build_apartment_matches.py`. To use the ward list, save it as `data/voters.csv` and omit both flags.
+After setup, repeat just the last command. Open `output/` for the workbooks. The command uses `apartments.csv` first if both versions of the apartment list exist. To use a specific apartment list, add `--apartments-file` followed by its path. Use `--voter-file` to choose a different voter list for one run.
 
-## 3. Open the results
+For new rosters, use one row per person with columns called `name` and `unit`. The four original roster formats are recognized by apartment name or by their usual `key` in an existing apartment list.
 
-Look in `output/ac/` for one workbook per apartment, for example `sample_residency_voters.xlsx`. A ward run writes to `output/`.
+Put these column names on the first row of the voter file.
 
-- `voters_mapped_tohouse` lists voters linked to flats with a roster status assigned.
-- `voters_unmapped` lists households whose address names the apartment without a matched flat, plus voters with a known flat and unassigned roster status.
-- `not_found_in_voterlist` lists roster entries with no voter link to that person at their flat.
+```csv
+serial_number,epic_number,name,relation_type,relation_name,house_number,age,gender,section_raw,part,ward,corporation,pincode,pollingname,pollingaddress
+```
