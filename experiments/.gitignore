@@ -1,0 +1,8 @@
+# Local experiment results can contain names, voter IDs, and other private source data.
+*.csv
+*.json
+*.xlsx
+*.png
+*.pdf
+__pycache__/
+*.pyc
