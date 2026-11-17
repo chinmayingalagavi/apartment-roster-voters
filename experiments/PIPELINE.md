@@ -1,5 +1,7 @@
 # Experiments on which voter-to-flat links to show
 
+The [revised matcher experiment](refine_pipeline/README.md) follows up on these trials with new candidate generation, named section evidence, and a score check for ambiguous flats. Its complete workbook runs produced 716 supported links and eight lower-rated links on the same benchmark, plus four plausible links that the benchmark had not reviewed.
+
 All rules tested here are identical for every apartment. They use the configured apartment name, voter file and roster in the usual way. The production matcher and its outputs were not changed. Detailed row-level results and experimental workbooks are local only and excluded from Git.
 
 The benchmark contains 2,013 historical preliminary voter-to-flat links from four apartments. Agents reviewing the records rated 727 Strong or Medium and 1,286 Unlikely or No Match. The saved current first sheets show 695 of the 727 supported links and 321 lower-rated links. The figures count links, not distinct people; related household members share evidence. Concorde's No Match labels were reconstructed from omitted rows, an approach checked against complete reviews for the other three apartments. One supported link missing from sheet 1 is already on sheet 2.
