@@ -51,3 +51,21 @@ python3 experiments/refine_pipeline/finalists.py --expand --write --score-floor 
 ```
 
 The recommended results are in `experiments/refine_pipeline/generated/named_section_80_expanded/`. Local caches and row-level outputs contain private data and are Git ignored. Load experiment caches only if generated locally by the capture script.
+
+## 95% name score follow-up
+
+The follow-up reran the actual resolver from the same captures. It added each fallback to the recommended rule, kept the full-word expansion, and compared mapped link keys against the 716 supported, eight lower-rated, and four unreviewed links above. Every variant retained all those links. Each cutoff includes 95 exactly and requires both the displayed name score and the supporting voter's name score to reach it.
+
+| Extra fallback | Supported added | Lower-rated added |
+| --- | ---: | ---: |
+| 95% alone | 4 | 86 |
+| 95% and no leftover address text | 1 | 75 |
+| Lower the isolated 100% rule to 95%, retaining a clear flat and multiword own name | 0 | 1 |
+| 95% and another explicitly named, unambiguous flat in the same exact section text, including across polling parts | 3 | 7 |
+| Same section rule, but require an own-name match with at least two name tokens when the flat is ambiguous | 3 | 0 |
+
+The guarded section variant adds two Purnima own-name links and one Silicon Oasis relation link. Initials count as name tokens in this variant. Supporting addresses must name the apartment and uniquely parse to a different flat. All three additions are graded Medium. The Purnima name evidence is plausible; the abbreviated addresses leave their building uncertain. In the broad fallback, many lower-rated links came from exact matches to a single common name combined with a reused flat number. The stricter section rule is promising for a review list, with very few independent positive examples in this benchmark.
+
+```sh
+python3 experiments/refine_pipeline/finalists.py --expand --compare-95
+```
