@@ -3,18 +3,20 @@
 """Build an Excel workbook per apartment from voter and roster files in CSV or XLSX.
 
 Read the voter list name and filename on the first row of the apartment list, followed by
-apartment names and roster filenames. Standardize source rosters in memory and label each
-output row with the voter list searched.
-Recognize the configured apartment name in voter addresses.
+apartment names, roster filenames, and optional alternate names separated by semicolons.
+Standardize source rosters in memory and label each output row with the voter list searched.
+Recognize any configured name for the apartment in voter addresses.
 The workbook lists assigned voters, unassigned voters alongside households without a unit
 link, and roster rows that no voter row is connected through.
 Relation and household links require a voter directly matched to the same flat.
 Two people linked on the voter roll can corroborate each other's roster matches.
 Rank competing voter records for each roster person by name score and booth support.
 Show match strength in the voter sheets, shade voter rows, and separate flats with dark borders.
-Use the name that produced the similarity score for the confidence word count.
-Keep review rows only when the linked voter's own-name score is above 70%.
-Omit Needs review rows from the mapped sheet when the same flat has a Strong row there.
+Select links through named-apartment section evidence, corroborated related pairs,
+an exact multiword own name and full flat, or a guarded 95% score in a named section.
+Recover uncontested full-word matches at explicitly named buildings and complete flats.
+Freeze support counts, competing rankings and Strong/Medium qualifications on the first
+resolved pool, then rebuild actual dependent links using surviving own-name voters.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ import json
 import re
 import unicodedata
 from copy import copy
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import combinations, groupby
@@ -44,6 +47,7 @@ DEFAULT_APARTMENTS_CSV = PROJECT_ROOT / "data" / "apartments.csv"
 DEFAULT_VOTER_CSV = PROJECT_ROOT / "data" / "voters.csv"
 INPUT_FILE_EXTENSIONS = (".csv", ".xlsx")
 UNIT_PAD_WIDTH = 3
+ALGORITHM_VERSION = "named-section-95-v1"
 
 VOTER_OUTPUT_COLUMNS = [
     "serial_number",
@@ -76,6 +80,8 @@ MATCH_DETAIL_COLUMNS = [
     "part_name_match",
     "name_match_pct",
     "other_hh_matched_booth",
+    "other_hh_matched_section_in_part",
+    "other_named_flats_in_section",
     "voter_link_type",
 ]
 
@@ -114,7 +120,6 @@ UNMAPPED_OUTPUT_COLUMNS = list(dict.fromkeys([
     *UNMAPPED_HOUSEHOLD_COLUMNS, *APARTMENT_UNIT_COLUMNS, "strength", *MATCH_DETAIL_COLUMNS, *VOTER_DETAIL_COLUMNS,
 ]))
 MAX_EXCEL_COLUMN_WIDTH = 50
-LOW_CONFIDENCE = "Below review cutoff"
 CONFIDENCE_COLORS = {
     "Strong": "FFDCEFE0",
     "Probable": "FFDEECF9",
@@ -204,10 +209,11 @@ ROSTER_LABEL_KEYS = {
 }
 
 APARTMENT_CONFIG_REQUIRED_COLUMNS = ["apartment_name", "roster_path"]
+APARTMENT_LIST_COLUMNS = [*APARTMENT_CONFIG_REQUIRED_COLUMNS, "alternate_names"]
 
 APARTMENT_CONFIG_COLUMNS = [
     "key",
-    *APARTMENT_CONFIG_REQUIRED_COLUMNS,
+    *APARTMENT_LIST_COLUMNS,
     "extra_filler_terms",
     "voter_csv",
 ]
@@ -246,6 +252,11 @@ class ApartmentConfig:
     apartment_name: str
     roster_path: Path
     extra_filler_terms: tuple[str, ...] = ()
+    alternate_names: tuple[str, ...] = ()
+
+    @property
+    def address_names(self) -> tuple[str, ...]:
+        return (self.apartment_name, *self.alternate_names)
 
 
 def split_config_terms(value: object) -> tuple[str, ...]:
@@ -322,14 +333,17 @@ def _read_apartment_list(path: Path) -> tuple[list[tuple[int, dict[str, str]]], 
         else:
             # Earlier setup files use only the voter filename in the first row.
             voter_file = resolve_config_path(first[0], path.parent)
-        columns = APARTMENT_CONFIG_REQUIRED_COLUMNS
+        columns = APARTMENT_LIST_COLUMNS
 
     apartment_rows = []
     for row_number, values in enumerate(rows[1:], start=2):
         if not any(value.strip() for value in values):
             continue
-        if not headed_layout and (len(values) < 2 or any(value.strip() for value in values[2:])):
-            raise SystemExit(f"{path} row {row_number} must contain an apartment name and roster filename")
+        if not headed_layout and (len(values) < 2 or any(value.strip() for value in values[3:])):
+            raise SystemExit(
+                f"{path} row {row_number} must contain an apartment name, roster filename, "
+                "and optional alternate names in column C"
+            )
         row = dict.fromkeys(columns, "")
         row.update(zip(columns, values))
         apartment_rows.append((row_number, row))
@@ -373,6 +387,7 @@ def _load_apartment_run_config(apartments_csv: Path) -> tuple[dict[str, Apartmen
             apartment_name=apartment_name,
             roster_path=resolve_config_path(roster_path_text, base_dir),
             extra_filler_terms=extra_filler_terms,
+            alternate_names=split_config_terms(row.get("alternate_names", "")),
         )
 
         voter_csv_text = row.get("voter_csv", "").strip()
@@ -388,17 +403,15 @@ def _load_apartment_run_config(apartments_csv: Path) -> tuple[dict[str, Apartmen
     return configs, voter_csv, searched_voter_list
 
 
-def compile_terms_re(terms: Iterable[str]) -> re.Pattern[str]:
+def compile_terms_re(terms: Iterable[str], *, allow_joined_words: bool = True) -> re.Pattern[str]:
+    separator = r"\s*" if allow_joined_words else " "
     patterns: list[str] = []
     for term in terms:
         normalized = matcher.normalize_address(term)
         if not normalized:
             continue
-        parts = normalized.split()
-        if len(parts) == 1:
-            patterns.append(rf"\b{re.escape(parts[0])}\b")
-        else:
-            patterns.append(r"\b" + r"\s*".join(re.escape(part) for part in parts) + r"\b")
+        phrase = separator.join(re.escape(part) for part in normalized.split())
+        patterns.append(rf"\b{phrase}\b")
     if not patterns:
         return re.compile(r"a^")
     return re.compile("|".join(patterns), re.IGNORECASE)
@@ -479,8 +492,13 @@ def normalize_address_for_units(value: object) -> str:
 
 
 def filler_re_for_config(config: ApartmentConfig, valid_blocks: set[str]) -> re.Pattern[str]:
+    filler_terms = (*COMMON_ADDRESS_FILLERS, config.apartment_name, *config.extra_filler_terms)
+    if config.alternate_names:
+        # Strip entire apartment names before shorter aliases and generic words such as "Apartment".
+        names = sorted(config.address_names, key=lambda name: len(matcher.normalize_address(name)), reverse=True)
+        filler_terms = (*names, *COMMON_ADDRESS_FILLERS, *config.extra_filler_terms)
     terms: list[str] = []
-    for term in (*COMMON_ADDRESS_FILLERS, config.apartment_name, *config.extra_filler_terms):
+    for term in filler_terms:
         normalized = matcher.normalize_address(term)
         if normalized in valid_blocks:
             continue
@@ -862,7 +880,7 @@ def normalize_roster(config: ApartmentConfig, source_rows: pd.DataFrame) -> pd.D
 
 
 def build_address_fields(voters: pd.DataFrame, roster_rows: pd.DataFrame, config: ApartmentConfig) -> pd.DataFrame:
-    label_re = compile_terms_re((config.apartment_name,))
+    label_re = compile_terms_re(config.address_names)
     valid_units = set(roster_rows["unit"])
     valid_blocks = {block for block in roster_rows["block"].astype(str).unique() if block}
     block_aliases = build_block_aliases(valid_blocks)
@@ -1393,8 +1411,7 @@ def summarize_unmapped_households(
     config: ApartmentConfig,
 ) -> pd.DataFrame:
     """Summarize household groups with an exact apartment name and no linked unit."""
-    normalized_name = matcher.normalize_address(config.apartment_name)
-    exact_name = re.compile(rf"\b{re.escape(normalized_name)}\b")
+    exact_name = compile_terms_re(config.address_names, allow_joined_words=False)
     named_rows = unmapped_rows["address_norm"].str.contains(exact_name, na=False)
     mapped_households = voters.loc[voters["_row_id"].isin(mapped_row_ids), "household_id"]
     report_rows = unmapped_rows[named_rows & ~unmapped_rows["household_id"].isin(mapped_households)]
@@ -1442,57 +1459,206 @@ def dominated_voter_links(out: pd.DataFrame) -> dict[tuple[int, str], set[str]]:
     return discarded
 
 
-def match_confidence(out: pd.DataFrame, voters: pd.DataFrame, apartment_name: str) -> pd.Series:
-    """Classify final mapped rows without changing which voters are linked."""
-    source = voters.set_index("_row_id")
-    multiple_matches: set[tuple[str, int]] = set()
-    named = out.loc[out["voter_link_type"].str.split(";").map(lambda kinds: "voter_name_match" in kinds)]
-    for unit, rows in named.groupby("apartment_unit", sort=False):
-        # A household must have two distinct direct matches to two distinct roster people.
-        for first, second in combinations(rows.to_dict("records"), 2):
-            first_id, second_id = first["_row_id"], second["_row_id"]
-            if first_id == second_id:
+def corroborated_named_pair_links(
+    initial: pd.DataFrame,
+    unit_evidence: dict[tuple[str, str], dict[int, dict[str, object]]],
+    source: pd.DataFrame,
+) -> set[tuple[int, str]]:
+    """Find reserved own-name pairs with full flats and a named relation between voters."""
+    claimed = corroborated_roster_matches(unit_evidence)
+    by_unit: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for row in initial.to_dict("records"):
+        row_id, unit = int(row["_row_id"]), row["apartment_unit"]
+        if (
+            row["apartment_status"] != UNASSIGNED_STATUS
+            and "voter_name_match" in row["voter_link_type"].split(";")
+            and claimed.get(row_id, (None,))[0] == unit
+            and source.at[row_id, "parsed_unit"] == unit
+        ):
+            by_unit[unit].append(row)
+
+    paired: set[tuple[int, str]] = set()
+    for unit, candidates in by_unit.items():
+        for first, second in combinations(candidates, 2):
+            first_id, second_id = int(first["_row_id"]), int(second["_row_id"])
+            if claimed[first_id] == claimed[second_id]:
                 continue
-            first_names = {connection_name_key(name) for name in first["_connection_names"]}
-            second_names = {connection_name_key(name) for name in second["_connection_names"]}
-            if len(first_names | second_names) < 2:
-                continue
-            first_voter, second_voter = source.loc[first_id], source.loc[second_id]
             if (
-                same_roll_household(first_voter, second_voter)
-                or matcher.relation_identifies_voter(first["relation_name"], second["voter_name"])
+                matcher.relation_identifies_voter(first["relation_name"], second["voter_name"])
                 or matcher.relation_identifies_voter(second["relation_name"], first["voter_name"])
             ):
-                multiple_matches.update(((unit, first_id), (unit, second_id)))
+                paired.update(((first_id, unit), (second_id, unit)))
+    return paired
 
-    # Carry corroboration to other mapped people in the same roll household.
-    household_keys = {
-        (unit, source.at[row_id, "household_id"], source.at[row_id, "address_norm"])
-        for unit, row_id in multiple_matches
-        if source.at[row_id, "household_id"] is not None
+
+def expand_named_full_word_matches(
+    voters: pd.DataFrame,
+    roster_rows: pd.DataFrame,
+    config: ApartmentConfig,
+    initial: pd.DataFrame,
+    unit_evidence: dict[tuple[str, str], dict[int, dict[str, object]]],
+) -> tuple[dict[tuple[str, str], dict[int, dict[str, object]]], set[tuple[int, str]]]:
+    """Add uncontested full-word name matches at an explicitly named building and full flat."""
+    mapped = initial[initial["apartment_unit"].ne("") & initial["apartment_status"].ne(UNASSIGNED_STATUS)]
+    already_mapped = set(mapped["_row_id"])
+    occupied = {
+        (row["apartment_unit"], connection_name_key(name))
+        for row in mapped.to_dict("records")
+        if "voter_name_match" in row["voter_link_type"].split(";")
+        for name in row["_connection_names"]
     }
-    apartment_pattern = rf"\b{re.escape(matcher.normalize_address(apartment_name))}\b"
-    exact_apartment = out["house_number"].map(matcher.normalize_address).str.contains(apartment_pattern)
-    corroborated = [
-        (unit, row_id) in multiple_matches
-        or (unit, source.at[row_id, "household_id"], source.at[row_id, "address_norm"]) in household_keys
-        for unit, row_id in zip(out["apartment_unit"], out["_row_id"])
+    people_by_flat: dict[str, list[tuple[str, dict[str, object]]]] = defaultdict(list)
+    for (unit, status), people in roster_by_unit_group(roster_rows).items():
+        people_by_flat[unit].extend((status, person) for person in people)
+
+    # Every word comparison here is exact, unordered, and excludes initials.
+    target = compile_terms_re(config.address_names, allow_joined_words=False)
+    candidates = voters[
+        voters["address_norm"].str.contains(target) & voters["parsed_unit"].notna()
+        & ~voters["_row_id"].isin(already_mapped)
     ]
-    scores = out["name_match_pct"].fillna(0)
-    booth_counts = out["other_hh_matched_booth"]
-    multiple_words = out["_match_has_multiple_words"]
-    strong = (
-        (scores.eq(100) & multiple_words)
-        | (scores.gt(95) & multiple_words & booth_counts.ge(1))
-        | (scores.gt(80) & booth_counts.ge(3))
-        | exact_apartment
-        | pd.Series(corroborated, index=out.index, dtype=bool)
+    proposals: dict[tuple[str, str], list[tuple[pd.Series, str, dict[str, object]]]] = defaultdict(list)
+    for _, voter in candidates.iterrows():
+        name_words = matcher.name_word_set(voter["name"])
+        if len(name_words) < 2:
+            continue
+        relation_words = matcher.name_word_set(voter["relation_name"])
+        unit = voter["parsed_unit"]
+        options = []
+        for status, person in people_by_flat[unit]:
+            roster_words = matcher.name_word_set(person["name"])
+            if len(roster_words) < 2:
+                continue
+            relation_matches = len(relation_words) >= 2 and (
+                relation_words <= roster_words or roster_words <= relation_words
+            )
+            if not relation_matches and (name_words <= roster_words or roster_words <= name_words):
+                options.append((status, person))
+        if len(options) != 1:
+            continue
+        status, person = options[0]
+        roster_link = unit, connection_name_key(person["name"])
+        if roster_link not in occupied:
+            proposals[roster_link].append((voter, status, person))
+
+    # Copy only modified evidence groups. Conflicting new claims are rejected together.
+    updated = unit_evidence.copy()
+    additions: set[tuple[int, str]] = set()
+    for (unit, _), options in proposals.items():
+        if len(options) != 1:
+            continue
+        voter, status, person = options[0]
+        row_id = int(voter["_row_id"])
+        key = unit, status
+        if key not in updated or updated[key] is unit_evidence.get(key):
+            updated[key] = updated.get(key, {}).copy()
+        if row_id in updated[key]:
+            record = updated[key][row_id]
+            updated[key][row_id] = {
+                **record, "person_hits": record["person_hits"].copy(), "scopes": record["scopes"].copy(),
+            }
+        hit = {
+            "voter_row_id": row_id, "serial_number": int(voter["serial_number"]),
+            "voter_name": voter["name"], "roster_row_id": person["roster_row_id"],
+            "roster_name": person["name"], "roster_name_norm": person["name_norm"],
+            "match_source": "voter_name", "match_kind": "named_flat_full_words",
+            "match_detail": "matching full words at a named building and parsed flat",
+            "part_score": 1.0,
+        }
+        add_evidence(updated[key], voter, [hit], [], "exact_unit")
+        additions.add((row_id, unit))
+    return updated, additions
+
+
+def select_supported_apartment_links(
+    voters: pd.DataFrame,
+    roster_rows: pd.DataFrame,
+    config: ApartmentConfig,
+    initial: pd.DataFrame,
+    unit_evidence: dict[tuple[str, str], dict[int, dict[str, object]]],
+    same_address_groups: dict[str, pd.DataFrame],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Select named-section, corroborated-pair, 100% and guarded 95% candidates and resolve anchors."""
+    source = voters.set_index("_row_id")
+    target = compile_terms_re(config.address_names, allow_joined_words=False)
+    candidates = initial[initial["apartment_unit"].ne("")].copy()
+    paired = corroborated_named_pair_links(initial, unit_evidence, source)
+    named_by_part: dict[tuple[str, str], set[str]] = defaultdict(set)
+    named_by_section: dict[str, set[str]] = defaultdict(set)
+    all_by_part: dict[tuple[str, str], set[str]] = defaultdict(set)
+
+    # Freeze supporting flat sets on the first resolved pool, including address-only records.
+    for row in candidates.to_dict("records"):
+        row_id, unit = int(row["_row_id"]), row["apartment_unit"]
+        section = row["section_raw"]
+        if pd.isna(section) or not str(section).strip():
+            continue
+        section_key = str(row["part"]), section
+        all_by_part[section_key].add(unit)
+        if source.at[row_id, "parsed_unit"] == unit and target.search(source.at[row_id, "address_norm"]):
+            named_by_part[section_key].add(unit)
+            named_by_section[section].add(unit)
+
+    chosen: set[tuple[int, str]] = set()
+    strong: set[tuple[int, str]] = set()
+    counts: dict[tuple[int, str], tuple[int, int]] = {}
+    all_links = set(zip(candidates["_row_id"], candidates["apartment_unit"]))
+    for row in candidates.to_dict("records"):
+        row_id, unit = key = int(row["_row_id"]), row["apartment_unit"]
+        voter = source.loc[row_id]
+        section = row["section_raw"]
+        valid_section = pd.notna(section) and bool(str(section).strip())
+        section_key = str(row["part"]), section
+        named_count = len(named_by_part.get(section_key, set()) - {unit}) if valid_section else 0
+        other_count = len(all_by_part.get(section_key, set()) - {unit}) if valid_section else 0
+        counts[key] = other_count, named_count
+        explicit = bool(target.search(voter["address_norm"]))
+        full_flat = voter["parsed_unit"] == unit
+        direct = "voter_name_match" in row["voter_link_type"].split(";")
+        name_score = int(row["name_match_pct"]) if pd.notna(row["name_match_pct"]) else 0
+        linked_score = row["_linked_voter_name_match_pct"]
+        linked_score = int(linked_score) if pd.notna(linked_score) else 0
+        score = min(name_score, linked_score)
+        exact_own_name = (
+            direct and name_score == 100 and row["_match_has_multiple_words"] and full_flat
+            and not str(voter["unexplained_address_text"] or "").strip()
+        )
+        section_supported = named_count >= 1 and (full_flat or score >= 80)
+        cross_part_supported = valid_section and bool(named_by_section.get(section, set()) - {unit})
+        high_name_supported = score >= 95 and cross_part_supported and (
+            full_flat or direct and len(matcher.tokenize_name(voter["name"])) >= 2
+        )
+        if explicit or section_supported or key in paired or exact_own_name or high_name_supported:
+            chosen.add(key)
+        if explicit or key in paired or (named_count >= 2 and full_flat and score >= 75):
+            strong.add(key)
+
+    # Ranking retains the complete preliminary pool, even rivals that fail eligibility.
+    booth_units = matched_units_at_booth(initial)
+    initial = initial.assign(other_hh_matched_booth=other_households_matched_at_booth(initial, booth_units))
+    discarded = dominated_voter_links(initial)
+    evidence, additions = expand_named_full_word_matches(voters, roster_rows, config, initial, unit_evidence)
+    chosen.update(additions)
+    strong.update(additions)
+    out, unmapped = resolve_voter_links(
+        voters[voters["has_target_label"]], roster_rows, config, evidence, same_address_groups, discarded,
+        original_links=chosen, excluded_links=all_links - chosen,
     )
-    confidence = pd.Series(LOW_CONFIDENCE, index=out.index)
-    confidence.loc[out["_linked_voter_name_match_pct"].gt(70)] = "Needs review"
-    confidence.loc[scores.eq(100) | (scores.gt(75) & booth_counts.ge(3))] = "Probable"
-    confidence.loc[strong] = "Strong"
-    return confidence
+    if out.empty:
+        return out, unmapped
+
+    # Grades and support stay based on preliminary features, even if resolution changes the displayed link.
+    keys = list(zip(out["_row_id"], out["apartment_unit"]))
+    mapped = out["apartment_unit"].ne("") & out["apartment_status"].ne(UNASSIGNED_STATUS)
+    out["_match_confidence"] = [
+        "Strong" if key in strong or "explicit_apartment_address" in kind.split(";") else "Probable"
+        for key, kind in zip(keys, out["voter_link_type"])
+    ]
+    out.loc[~mapped, "_match_confidence"] = "Strong"
+    out["other_hh_matched_booth"] = other_households_matched_at_booth(out, booth_units)
+    out["other_hh_matched_section_in_part"] = [counts.get(key, (0, 0))[0] for key in keys]
+    out["other_named_flats_in_section"] = [counts.get(key, (0, 0))[1] for key in keys]
+    return out, unmapped
 
 
 def build_apartment_voter_rows(
@@ -1659,37 +1825,12 @@ def build_apartment_voter_rows(
                     kept_hits.append(hit)
             record["person_hits"] = kept_hits
 
-    # Count booth support once with all candidates present, so pruning cannot change its own rankings.
-    discarded = {}
-    out, unmapped_rows = resolve_voter_links(voters, roster_rows, config, unit_evidence, same_address_groups, discarded)
+    # Resolve once before applying frozen named-section eligibility and competing-match rankings.
+    out, unmapped_rows = resolve_voter_links(voters, roster_rows, config, unit_evidence, same_address_groups, {})
     if not out.empty:
-        booth_units = matched_units_at_booth(out)
-        out["other_hh_matched_booth"] = other_households_matched_at_booth(out, booth_units)
-        discarded = dominated_voter_links(out)
-        if discarded:
-            original_links = set(zip(out["_row_id"], out["apartment_unit"]))
-            out, unmapped_rows = resolve_voter_links(
-                voters, roster_rows, config, unit_evidence, same_address_groups, discarded,
-                original_links=original_links,
-            )
-            if not out.empty:
-                out["other_hh_matched_booth"] = other_households_matched_at_booth(out, booth_units)
-
-    # Recheck links after dropping their low-confidence anchors, keeping booth support fixed.
-    excluded_links: set[tuple[int, str]] = set()
-    while not out.empty:
-        out["_match_confidence"] = match_confidence(out, voters, config.apartment_name)
-        below_cutoff = out["apartment_unit"].ne("") & out["_match_confidence"].eq(LOW_CONFIDENCE)
-        if not below_cutoff.any():
-            break
-        excluded_links.update(zip(out.loc[below_cutoff, "_row_id"], out.loc[below_cutoff, "apartment_unit"]))
-        original_links = set(zip(out["_row_id"], out["apartment_unit"])) - excluded_links
-        out, unmapped_rows = resolve_voter_links(
-            voters, roster_rows, config, unit_evidence, same_address_groups, discarded,
-            original_links=original_links, excluded_links=excluded_links,
+        out, unmapped_rows = select_supported_apartment_links(
+            voters, roster_rows, config, out, unit_evidence, same_address_groups,
         )
-        if not out.empty:
-            out["other_hh_matched_booth"] = other_households_matched_at_booth(out, booth_units)
 
     connected: set[tuple[str, str]] = set()
     if out.empty:
@@ -2119,17 +2260,12 @@ def run_one(
     not_matched = roster_rows_not_matched(source_rows, roster_rows, connected)
     is_unassigned = out["apartment_status"].eq(UNASSIGNED_STATUS)
     is_mapped = out["apartment_unit"].ne("") & ~is_unassigned
-    # Hide review rows only when a Strong match will appear for the same flat on the mapped sheet.
-    confidence = out["_match_confidence"]
-    strong_units = out.loc[is_mapped & confidence.eq("Strong"), "apartment_unit"]
-    suppress_review = is_mapped & confidence.eq("Needs review") & out["apartment_unit"].isin(strong_units)
-    mapped_voters = out.loc[is_mapped & ~suppress_review]
+    mapped_voters = out.loc[is_mapped]
     output_xlsx.parent.mkdir(parents=True, exist_ok=True)
     write_output_workbook(
         output_xlsx, mapped_voters, not_matched, unmapped_households, out.loc[is_unassigned],
         searched_voter_list=searched_voter_list,
     )
-    out = out.loc[~suppress_review]
     print(f"{config.key}: rows: {len(out)}")
     if not out.empty:
         print(out["apartment_status"].value_counts().to_string())
@@ -2193,8 +2329,10 @@ def apartment_run_summary(
     ] if not output_rows.empty else output_rows
 
     return {
+        "algorithm_version": ALGORITHM_VERSION,
         "apartment_key": config.key,
         "apartment_name": config.apartment_name,
+        "alternate_names": list(config.alternate_names),
         "roster_source": path_for_log(config.roster_path),
         "output_xlsx": path_for_log(output_xlsx),
         "roster_rows": int(len(roster_rows)),

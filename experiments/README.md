@@ -1,5 +1,7 @@
 # Grading experiments
 
+This folder preserves the experiments that led to the final matcher. The approved named-section algorithm with the guarded 95% fallback is now implemented in `code/build_apartment_matches.py` and documented in the [main README](../README.md#matching-algorithm). Historical scripts depending on the old matcher should be run with source from commit `d13b699`; their references to the current algorithm describe that earlier baseline.
+
 These experiments compare simple grading rules with the four independent agent reviews of the Bangalore South pre-scoring candidate workbooks. They do not change the matcher, its output, or the desktop app.
 
 ## Benchmark
