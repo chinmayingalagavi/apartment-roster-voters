@@ -36,6 +36,10 @@ After setup, repeat just the last command. Open `output/` for the workbooks. The
 
 The command uses `apartments.csv` first if both versions exist. To use a specific apartment list, add `--apartments-file` followed by its path. To choose a different voter file for one run, use `--voter-file` and give its AC or ward name with `--searched-voter-list`.
 
+To export the preliminary name match list, run `python3 name_match/build_name_matches.py` with the same arguments. This writes the usual three sheets from the first resolved candidate list, before final selection, location support counts and strength grading. Both voter sheets have a blank `strength` column. The CLI defaults to `output/preliminary/` for this mode. You can also use `--preliminary-only` with the main command.
+
+In the desktop app, select **Advanced → Include name match lists** to save both the scored workbook (`*_voters.xlsx`) and the preliminary workbook (`*_before_scoring.xlsx`) in the same results folder.
+
 For new rosters, use one row per person with columns called `name` and `unit`. The four original roster formats are recognized by apartment name or by their usual `key` in an existing apartment list.
 
 Put these column names on the first row of the voter file.

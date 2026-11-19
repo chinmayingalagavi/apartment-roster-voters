@@ -17,6 +17,8 @@ an exact multiword own name and full flat, or a guarded 95% score in a named sec
 Recover uncontested full-word matches at explicitly named buildings and complete flats.
 Freeze support counts, competing rankings and Strong/Medium qualifications on the first
 resolved pool, then rebuild actual dependent links using surviving own-name voters.
+Use --preliminary-only to export that first resolved pool before final selection and grading.
+The desktop app can save both workbooks from one run.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ from datetime import datetime
 from itertools import combinations, groupby
 from pathlib import Path
 from textwrap import wrap
-from typing import Iterable
+from typing import Callable, Iterable
 
 import pandas as pd
 from openpyxl.styles import Alignment, PatternFill, Side
@@ -1666,6 +1668,9 @@ def build_apartment_voter_rows(
     roster_rows: pd.DataFrame,
     roster: dict[tuple[str, str], list[dict[str, object]]],
     config: ApartmentConfig,
+    *,
+    preliminary_only: bool = False,
+    on_preliminary: Callable[[pd.DataFrame, pd.DataFrame], None] | None = None,
 ) -> tuple[pd.DataFrame, set[tuple[str, str]], pd.DataFrame]:
     """Return voter rows, connected (unit, roster name key) pairs, and unmapped household groups."""
     identity_usable = voters.copy()
@@ -1825,11 +1830,32 @@ def build_apartment_voter_rows(
                     kept_hits.append(hit)
             record["person_hits"] = kept_hits
 
-    # Resolve once before applying frozen named-section eligibility and competing-match rankings.
+    # This first resolution is the preliminary report's stopping point.
     out, unmapped_rows = resolve_voter_links(voters, roster_rows, config, unit_evidence, same_address_groups, {})
-    if not out.empty:
+    if on_preliminary is not None:
+        on_preliminary(out, unmapped_rows)
+    if not preliminary_only and not out.empty:
         out, unmapped_rows = select_supported_apartment_links(
             voters, roster_rows, config, out, unit_evidence, same_address_groups,
+        )
+    return prepare_apartment_output(voters, config, out, unmapped_rows, preliminary_only=preliminary_only)
+
+
+def prepare_apartment_output(
+    voters: pd.DataFrame,
+    config: ApartmentConfig,
+    out: pd.DataFrame,
+    unmapped_rows: pd.DataFrame,
+    *,
+    preliminary_only: bool,
+) -> tuple[pd.DataFrame, set[tuple[str, str]], pd.DataFrame]:
+    """Prepare the standard output rows for either stage of link resolution."""
+    if preliminary_only:
+        out = out.assign(
+            _match_confidence=None,
+            other_hh_matched_booth=None,
+            other_hh_matched_section_in_part=None,
+            other_named_flats_in_section=None,
         )
 
     connected: set[tuple[str, str]] = set()
@@ -2125,24 +2151,28 @@ def excel_ready(frame: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
-def shade_households(sheet, confidence: Iterable[str | None]) -> None:
-    """Color voter rows by confidence and draw a line between flats."""
+def shade_households(sheet, confidence: Iterable[str | None], *, include_unscored: bool = False) -> None:
+    """Color scored voter rows and draw a line between flats."""
     fills = {
         level: PatternFill(fill_type="solid", fgColor=color)
         for level, color in CONFIDENCE_COLORS.items()
     }
     unit_column = next(cell.column - 1 for cell in sheet[1] if cell.value == "apartment_unit")
     rows_with_confidence = zip(sheet.iter_rows(min_row=2), confidence, strict=True)
-    voter_rows = ((row, level) for row, level in rows_with_confidence if pd.notna(level))
+    voter_rows = (
+        (row, level) for row, level in rows_with_confidence
+        if pd.notna(level) or (include_unscored and row[unit_column].value)
+    )
     households = groupby(voter_rows, key=lambda item: item[0][unit_column].value)
     for household_index, (_, rows) in enumerate(households):
         for row_index, (row, level) in enumerate(rows):
             for cell in row:
-                cell.fill = fills[level]
-                if cell.font.color is not None and cell.font.color.type == "rgb" and cell.font.color.rgb == "FFFFFFFF":
-                    font = copy(cell.font)
-                    font.color = "FF17202A"
-                    cell.font = font
+                if pd.notna(level):
+                    cell.fill = fills[level]
+                    if cell.font.color is not None and cell.font.color.type == "rgb" and cell.font.color.rgb == "FFFFFFFF":
+                        font = copy(cell.font)
+                        font.color = "FF17202A"
+                        cell.font = font
                 if household_index and row_index == 0:
                     border = copy(cell.border)
                     border.top = HOUSEHOLD_BORDER
@@ -2181,6 +2211,7 @@ def write_output_workbook(
     unassigned_voters: pd.DataFrame,
     *,
     searched_voter_list: str = "",
+    preliminary_only: bool = False,
 ) -> None:
     # Keep the household summary columns and retain the full record for each moved voter.
     household_summaries = unmapped_households.assign(apartment_status=UNMAPPED_STATUS)
@@ -2205,8 +2236,10 @@ def write_output_workbook(
             frame = excel_ready(frame)
             display = frame
             if sheet_name in (VOTERS_SHEET, UNMAPPED_HOUSEHOLDS_SHEET):
-                strength = frame["_match_confidence"].replace({"Probable": "Medium"})
-                if sheet_name == VOTERS_SHEET:
+                strength = frame["_match_confidence"]
+                if not preliminary_only:
+                    strength = strength.replace({"Probable": "Medium"})
+                if sheet_name == VOTERS_SHEET and not preliminary_only:
                     link_types = frame["voter_link_type"].str.split(";")
                     own_name = link_types.map(lambda kinds: "voter_name_match" in kinds)
                     household = link_types.map(
@@ -2214,9 +2247,8 @@ def write_output_workbook(
                     )
                     strength = strength.mask(household & ~own_name, strength + " - household")
                     strength = strength.mask(own_name, strength + " - name linked")
-                    display = frame.assign(strength=strength)[MAPPED_OUTPUT_COLUMNS]
-                else:
-                    display = frame.assign(strength=strength)[UNMAPPED_OUTPUT_COLUMNS]
+                voter_columns = MAPPED_OUTPUT_COLUMNS if sheet_name == VOTERS_SHEET else UNMAPPED_OUTPUT_COLUMNS
+                display = frame.assign(strength=strength)[voter_columns]
             display = display.drop(columns="searched_voter_list", errors="ignore").assign(
                 searched_voter_list=searched_voter_list,
             )
@@ -2224,7 +2256,7 @@ def write_output_workbook(
             sheet = writer.sheets[sheet_name]
             format_sheet(sheet, display)
             if sheet_name in (VOTERS_SHEET, UNMAPPED_HOUSEHOLDS_SHEET):
-                shade_households(sheet, frame["_match_confidence"])
+                shade_households(sheet, frame["_match_confidence"], include_unscored=preliminary_only)
 
 
 def read_voter_source(path: Path, *, nrows: int | None = None) -> pd.DataFrame:
@@ -2247,8 +2279,14 @@ def run_one(
     output_xlsx: Path,
     *,
     searched_voter_list: str = "",
+    preliminary_only: bool = False,
+    preliminary_output_xlsx: Path | None = None,
 ) -> dict[str, object]:
-    """Read the roster once, write the apartment workbook, and return its run summary."""
+    """Write the requested workbook(s) from one matcher run and return its main output summary."""
+    if preliminary_output_xlsx is not None and (
+        preliminary_only or preliminary_output_xlsx.resolve() == output_xlsx.resolve()
+    ):
+        raise ValueError("The additional preliminary workbook requires a separate path and a scored run.")
     source_rows = read_roster_source(config)
     roster_rows = normalize_roster(config, source_rows)
     roster = roster_by_unit_group(roster_rows)
@@ -2256,16 +2294,29 @@ def run_one(
     voters["_row_id"] = range(len(voters))
     voters = build_address_fields(voters, roster_rows, config)
     voters = matcher.assign_households(voters)
-    out, connected, unmapped_households = build_apartment_voter_rows(voters, roster_rows, roster, config)
-    not_matched = roster_rows_not_matched(source_rows, roster_rows, connected)
-    is_unassigned = out["apartment_status"].eq(UNASSIGNED_STATUS)
-    is_mapped = out["apartment_unit"].ne("") & ~is_unassigned
-    mapped_voters = out.loc[is_mapped]
-    output_xlsx.parent.mkdir(parents=True, exist_ok=True)
-    write_output_workbook(
-        output_xlsx, mapped_voters, not_matched, unmapped_households, out.loc[is_unassigned],
-        searched_voter_list=searched_voter_list,
+
+    def export(destination, output, connected_people, household_summaries, *, preliminary):
+        not_matched = roster_rows_not_matched(source_rows, roster_rows, connected_people)
+        is_unassigned = output["apartment_status"].eq(UNASSIGNED_STATUS)
+        is_mapped = output["apartment_unit"].ne("") & ~is_unassigned
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        write_output_workbook(
+            destination, output.loc[is_mapped], not_matched, household_summaries, output.loc[is_unassigned],
+            searched_voter_list=searched_voter_list, preliminary_only=preliminary,
+        )
+        return not_matched
+
+    # Snapshot the first resolution before the regular run selects and grades its links.
+    on_preliminary = None
+    if preliminary_output_xlsx is not None:
+        def on_preliminary(initial, unmapped):
+            preliminary = prepare_apartment_output(voters, config, initial, unmapped, preliminary_only=True)
+            export(preliminary_output_xlsx, *preliminary, preliminary=True)
+
+    out, connected, unmapped_households = build_apartment_voter_rows(
+        voters, roster_rows, roster, config, preliminary_only=preliminary_only, on_preliminary=on_preliminary,
     )
+    not_matched = export(output_xlsx, out, connected, unmapped_households, preliminary=preliminary_only)
     print(f"{config.key}: rows: {len(out)}")
     if not out.empty:
         print(out["apartment_status"].value_counts().to_string())
@@ -2374,6 +2425,7 @@ def write_run_log(
     summaries: list[dict[str, object]],
     *,
     searched_voter_list: str = "",
+    preliminary_only: bool = False,
 ) -> Path:
     generated_at = datetime.now().astimezone()
     log_dir = output_root / "log"
@@ -2390,13 +2442,15 @@ def write_run_log(
         "apartments_csv": path_for_log(apartments_csv),
         "apartments": summaries,
     }
+    if preliminary_only:
+        payload["preliminary_only"] = True
     with log_path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
         handle.write("\n")
     return log_path
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("apartment", nargs="?", default="all")
     parser.add_argument("--apartments-file", "--apartments-csv", type=Path, help="apartment list in CSV or XLSX")
@@ -2404,7 +2458,8 @@ def main() -> None:
     parser.add_argument("--searched-voter-list", help="AC or ward name to show in the output")
     parser.add_argument("--output-xlsx", type=Path)
     parser.add_argument("--output-dir", type=Path)
-    args = parser.parse_args()
+    parser.add_argument("--preliminary-only", action="store_true", help="export the first resolved name matches before final selection and grading")
+    args = parser.parse_args(argv)
 
     apartments_file = args.apartments_file
     if apartments_file is None:
@@ -2429,17 +2484,21 @@ def main() -> None:
     if args.output_dir and args.output_xlsx:
         raise SystemExit("--output-dir and --output-xlsx cannot be used together")
 
-    output_root = args.output_dir or PROJECT_ROOT / "output"
+    default_output = PROJECT_ROOT / "output"
+    if args.preliminary_only:
+        default_output /= "preliminary"
+    output_root = args.output_dir or default_output
     selected = configs.values() if args.apartment == "all" else (configs[args.apartment],)
     summaries = [
         run_one(
             config, voter_csv, args.output_xlsx or output_root / f"{config.key}_voters.xlsx",
-            searched_voter_list=searched_voter_list,
+            searched_voter_list=searched_voter_list, preliminary_only=args.preliminary_only,
         )
         for config in selected
     ]
     log_path = write_run_log(
-        output_root, voter_csv, apartments_file, summaries, searched_voter_list=searched_voter_list,
+        output_root, voter_csv, apartments_file, summaries,
+        searched_voter_list=searched_voter_list, preliminary_only=args.preliminary_only,
     )
     print(f"run_log: {log_path}")
 
