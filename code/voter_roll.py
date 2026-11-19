@@ -1,5 +1,6 @@
 # Normalize raw Assembly Constituency Excel voter rolls for the matcher.
 # Inputs: the first worksheet's header and data rows, with an optional row limit.
+# Prefer supplied part numbers and derive grouping keys when they are missing.
 # AUTHOR: Chinmay and AI
 
 from __future__ import annotations
@@ -26,8 +27,9 @@ AC_HEADERS = {
     "pollingaddress": "Address of Polling Station",
 }
 AC_SIGNATURE = ("SI. NO.", "EPIC ID", "No. Name and Reservation Status of Assembly Constituency")
-AC_REQUIRED = ("serial_number", "epic_number", "name", "relation_name", "house_number", "pollingname", "pollingaddress", "section_raw")
+AC_REQUIRED = ("serial_number", "epic_number", "name", "relation_name", "house_number", "section_raw")
 AC_OUTPUT_COLUMNS = (*AC_HEADERS, "part", "corporation")
+PART_HEADER_KEYS = ("part", "partno", "partnumber")
 STATION_PREFIX = re.compile(r"^\s*(\d+)\s*[-–—.:]\s*\S")
 LEGACY_RELATIONS = {
     "fathersname": "Father", "husbandsname": "Husband", "mothersname": "Mother", "others": "Other",
@@ -65,7 +67,9 @@ def read_ac_export(
     if len(positions) != sum(bool(key) for key in keys):
         raise ValueError(f"{filename}: the AC worksheet contains duplicate column names")
     indexes = {field: positions.get(header_key(label)) for field, label in AC_HEADERS.items()}
-    missing = [AC_HEADERS[field] for field in AC_REQUIRED if indexes[field] is None]
+    part_index = next((positions[key] for key in PART_HEADER_KEYS if key in positions), None)
+    required = AC_REQUIRED if part_index is not None else (*AC_REQUIRED, "pollingname", "pollingaddress")
+    missing = [AC_HEADERS[field] for field in required if indexes[field] is None]
     if missing:
         raise ValueError(f"{filename} is missing required AC export columns: {', '.join(missing)}")
     if nrows is not None and nrows < 0:
@@ -99,8 +103,15 @@ def read_ac_export(
                 record["relation_name"] = remainder.strip() or None
             record["relation_type"] = (record["relation_type"] or "").strip() or legacy_type
 
-            station = STATION_PREFIX.match(text_value(record["pollingname"]))
-            if station:
+            # The electoral-roll part can differ from the polling-station number.
+            supplied_part = text_value(cell_value(row, part_index)).strip()
+            station = STATION_PREFIX.match(text_value(record["pollingname"])) if not supplied_part else None
+            if supplied_part:
+                if not supplied_part.isdecimal():
+                    raise ValueError(f"{filename}, row {number}: Part must be a nonnegative integer")
+                record["part"] = int(supplied_part)
+                previous_station = previous_roll_number = None
+            elif station:
                 record["part"] = int(station.group(1))
                 previous_station = previous_roll_number = None
             else:
