@@ -44,7 +44,9 @@ In the desktop app, select **Advanced → Include name match lists** to save bot
 
 For new rosters, use one row per person with columns called `name` and `unit`. The four original roster formats are recognized by apartment name or by their usual `key` in an existing apartment list.
 
-Put these column names on the first row of the voter file.
+You can use an original AC Excel export such as `AC_176_BANGALORE_SOUTH.xlsx` directly. The matcher recognizes its official column headings on the first worksheet. It reads the `Relation` column or the relationship prefix used in older exports. It uses the polling-station number for `part`. For unnumbered stations, it assigns separate local group IDs using consecutive source addresses and roll-number boundaries.
+
+For a prepared voter file, put these column names on the first row.
 
 ```csv
 serial_number,epic_number,name,relation_type,relation_name,house_number,age,gender,section_raw,part,ward,corporation,pincode,pollingname,pollingaddress

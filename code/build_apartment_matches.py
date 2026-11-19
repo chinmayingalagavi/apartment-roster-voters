@@ -4,6 +4,7 @@
 
 Read the voter list name and filename on the first row of the apartment list, followed by
 apartment names, roster filenames, and optional alternate names separated by semicolons.
+Read prepared voter tables or normalize a raw AC Excel export in memory.
 Standardize source rosters in memory and label each output row with the voter list searched.
 Recognize any configured name for the apartment in voter addresses.
 The workbook lists assigned voters, unassigned voters alongside households without a unit
@@ -42,6 +43,7 @@ from openpyxl.styles import Alignment, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 import matching as matcher
+from voter_roll import read_ac_export
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -2260,9 +2262,18 @@ def write_output_workbook(
 
 
 def read_voter_source(path: Path, *, nrows: int | None = None) -> pd.DataFrame:
-    """Read a prepared voter table from CSV or the first worksheet in an XLSX file."""
+    """Read a prepared table or raw AC export from a voter-list file."""
     if path.suffix.lower() == ".xlsx":
-        voters = pd.read_excel(path, nrows=nrows, dtype={"epic_number": str})
+        with pd.ExcelFile(path, engine="openpyxl") as workbook:
+            rows = workbook.book.worksheets[0].iter_rows(values_only=True)
+            try:
+                voters = read_ac_export(next(rows, ()), rows, path.name, nrows=nrows)
+            finally:
+                close_rows = getattr(rows, "close", None)
+                if close_rows is not None:
+                    close_rows()
+            if voters is None:
+                voters = workbook.parse(nrows=nrows, dtype={"epic_number": str})
     else:
         voters = pd.read_csv(path, nrows=nrows)
 
@@ -2281,6 +2292,7 @@ def run_one(
     searched_voter_list: str = "",
     preliminary_only: bool = False,
     preliminary_output_xlsx: Path | None = None,
+    voter_rows: pd.DataFrame | None = None,
 ) -> dict[str, object]:
     """Write the requested workbook(s) from one matcher run and return its main output summary."""
     if preliminary_output_xlsx is not None and (
@@ -2290,8 +2302,8 @@ def run_one(
     source_rows = read_roster_source(config)
     roster_rows = normalize_roster(config, source_rows)
     roster = roster_by_unit_group(roster_rows)
-    voters = read_voter_source(voter_csv)
-    voters["_row_id"] = range(len(voters))
+    voters = read_voter_source(voter_csv) if voter_rows is None else voter_rows
+    voters = voters.assign(_row_id=range(len(voters)))
     voters = build_address_fields(voters, roster_rows, config)
     voters = matcher.assign_households(voters)
 
@@ -2489,10 +2501,11 @@ def main(argv: list[str] | None = None) -> None:
         default_output /= "preliminary"
     output_root = args.output_dir or default_output
     selected = configs.values() if args.apartment == "all" else (configs[args.apartment],)
+    voter_rows = read_voter_source(voter_csv)
     summaries = [
         run_one(
             config, voter_csv, args.output_xlsx or output_root / f"{config.key}_voters.xlsx",
-            searched_voter_list=searched_voter_list, preliminary_only=args.preliminary_only,
+            searched_voter_list=searched_voter_list, preliminary_only=args.preliminary_only, voter_rows=voter_rows,
         )
         for config in selected
     ]
