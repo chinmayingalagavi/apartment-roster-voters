@@ -1,6 +1,7 @@
 # Normalize raw Assembly Constituency Excel voter rolls for the matcher.
 # Inputs: the first worksheet's header and data rows, with an optional row limit.
 # Prefer supplied parts, recover bounded station-number gaps, and keep uncertain blocks separate.
+# Use consecutive polling addresses when roll numbers are missing.
 # Retain roll numbers and relationship details when the source supplies them.
 # AUTHOR: Chinmay and AI
 
@@ -89,7 +90,7 @@ def read_ac_export(
         previous_roll_number = None
         previous_station_number = None
         pending_groups: list[int] = []
-        gap_has_roll_evidence = True
+        gap_has_address_evidence = True
         for number, row in enumerate(rows, start=2):
             if not any(value is not None and str(value).strip() for value in row):
                 continue
@@ -122,12 +123,12 @@ def read_ac_export(
                 occupied_numbers.add(part)
                 if station_number is not None:
                     occupied_numbers.add(station_number)
-                    if (pending_groups and gap_has_roll_evidence and previous_station_number is not None
+                    if (pending_groups and gap_has_address_evidence and previous_station_number is not None
                             and station_number - previous_station_number - 1 == len(pending_groups)):
                         proposed_gaps.append(dict(zip(pending_groups, range(previous_station_number + 1, station_number))))
                 # A supplied part without a numbered station cannot bound a station gap.
                 pending_groups.clear()
-                gap_has_roll_evidence = True
+                gap_has_address_evidence = True
                 previous_station_number = station_number
                 previous_station = previous_roll_number = None
             else:
@@ -135,17 +136,20 @@ def read_ac_export(
                 station_key = (record["pollingname"], record["pollingaddress"], record["ward"])
                 roll_text = text_value(record["roll_number"]).strip()
                 roll_number = int(roll_text) if roll_text.isdecimal() else None
-                starts_block = (
-                    station_key != previous_station or not record["pollingaddress"]
-                    or roll_number is None or previous_roll_number is None or roll_number <= previous_roll_number
-                )
+                has_polling_address = bool(text_value(record["pollingaddress"]).strip())
+                resets_roll = roll_number is not None and previous_roll_number is not None and roll_number <= previous_roll_number
+                starts_block = station_key != previous_station or not has_polling_address or resets_roll
                 if starts_block:
                     unnumbered_groups += 1
                     pending_groups.append(-unnumbered_groups)
-                if roll_number is None or not record["pollingaddress"]:
-                    gap_has_roll_evidence = False
+                    previous_roll_number = None
+                if not has_polling_address:
+                    gap_has_address_evidence = False
+                # A blank roll number keeps the last known number for reset detection.
+                if roll_number is not None:
+                    previous_roll_number = roll_number
                 record["part"] = -unnumbered_groups
-                previous_station, previous_roll_number = station_key, roll_number
+                previous_station = station_key
             record["corporation"] = None
             yield tuple(record[field] for field in AC_OUTPUT_COLUMNS)
 
