@@ -2,6 +2,8 @@
 
 Match a voter list against apartment rosters and get one Excel workbook per apartment.
 
+Download the desktop app for [Mac with Apple silicon](https://github.com/chinmayingalagavi/apartment-roster-voters/releases/latest/download/Apartment-Voter-Matcher-macOS-Apple-Silicon.zip) or [64-bit Windows](https://github.com/chinmayingalagavi/apartment-roster-voters/releases/latest/download/Apartment-Voter-Matcher-Windows-x64.exe). These links always use the latest release. Unzip the Mac download and open the app, or open the Windows executable. [Release notes and instructions](https://github.com/chinmayingalagavi/apartment-roster-voters/releases/latest)
+
 ## Run from a terminal
 
 Create a `data/` folder in this repository. Put the voter list and apartment rosters in it. Each file can be CSV or XLSX and can have any filename. Save the apartment list itself as `data/apartments.csv` or `data/apartments.xlsx`.
