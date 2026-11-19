@@ -1,12 +1,13 @@
 # Normalize raw Assembly Constituency Excel voter rolls for the matcher.
 # Inputs: the first worksheet's header and data rows, with an optional row limit.
-# Prefer supplied part numbers and derive grouping keys when they are missing.
+# Prefer supplied parts, recover bounded station-number gaps, and keep uncertain blocks separate.
 # Retain roll numbers and relationship details when the source supplies them.
 # AUTHOR: Chinmay and AI
 
 from __future__ import annotations
 
 import re
+from collections import Counter
 from typing import Iterable
 
 import pandas as pd
@@ -79,10 +80,16 @@ def read_ac_export(
     if nrows == 0:
         return pd.DataFrame(columns=AC_OUTPUT_COLUMNS)
 
+    occupied_numbers: set[int] = set()
+    proposed_gaps: list[dict[int, int]] = []
+
     def records():
         unnumbered_groups = 0
         previous_station = None
         previous_roll_number = None
+        previous_station_number = None
+        pending_groups: list[int] = []
+        gap_has_roll_evidence = True
         for number, row in enumerate(rows, start=2):
             if not any(value is not None and str(value).strip() for value in row):
                 continue
@@ -105,17 +112,26 @@ def read_ac_export(
 
             # The electoral-roll part can differ from the polling-station number.
             supplied_part = text_value(cell_value(row, part_index)).strip()
-            station = STATION_PREFIX.match(text_value(record["pollingname"])) if not supplied_part else None
-            if supplied_part:
-                if not supplied_part.isdecimal():
-                    raise ValueError(f"{filename}, row {number}: Part must be a nonnegative integer")
-                record["part"] = int(supplied_part)
-                previous_station = previous_roll_number = None
-            elif station:
-                record["part"] = int(station.group(1))
+            station = STATION_PREFIX.match(text_value(record["pollingname"]))
+            station_number = int(station.group(1)) if station else None
+            if supplied_part and not supplied_part.isdecimal():
+                raise ValueError(f"{filename}, row {number}: Part must be a nonnegative integer")
+            if supplied_part or station_number is not None:
+                part = int(supplied_part) if supplied_part else station_number
+                record["part"] = part
+                occupied_numbers.add(part)
+                if station_number is not None:
+                    occupied_numbers.add(station_number)
+                    if (pending_groups and gap_has_roll_evidence and previous_station_number is not None
+                            and station_number - previous_station_number - 1 == len(pending_groups)):
+                        proposed_gaps.append(dict(zip(pending_groups, range(previous_station_number + 1, station_number))))
+                # A supplied part without a numbered station cannot bound a station gap.
+                pending_groups.clear()
+                gap_has_roll_evidence = True
+                previous_station_number = station_number
                 previous_station = previous_roll_number = None
             else:
-                # A negative local key keeps contiguous unnumbered stations separate.
+                # Keep a distinct negative key for each block until the next station is known.
                 station_key = (record["pollingname"], record["pollingaddress"], record["ward"])
                 roll_text = text_value(record["roll_number"]).strip()
                 roll_number = int(roll_text) if roll_text.isdecimal() else None
@@ -125,9 +141,24 @@ def read_ac_export(
                 )
                 if starts_block:
                     unnumbered_groups += 1
+                    pending_groups.append(-unnumbered_groups)
+                if roll_number is None or not record["pollingaddress"]:
+                    gap_has_roll_evidence = False
                 record["part"] = -unnumbered_groups
                 previous_station, previous_roll_number = station_key, roll_number
             record["corporation"] = None
             yield tuple(record[field] for field in AC_OUTPUT_COLUMNS)
 
-    return pd.DataFrame.from_records(records(), columns=AC_OUTPUT_COLUMNS, nrows=nrows)
+    voters = pd.DataFrame.from_records(records(), columns=AC_OUTPUT_COLUMNS, nrows=nrows)
+    # Check the entire input before assigning numbers: a repeated or already-used
+    # number could otherwise merge distinct station groups.
+    proposed_numbers = Counter(number for gap in proposed_gaps for number in gap.values())
+    recovered = {
+        local_part: station_number
+        for gap in proposed_gaps
+        if all(number not in occupied_numbers and proposed_numbers[number] == 1 for number in gap.values())
+        for local_part, station_number in gap.items()
+    }
+    if recovered:
+        voters["part"] = voters["part"].replace(recovered)
+    return voters
