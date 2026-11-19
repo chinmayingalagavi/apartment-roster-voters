@@ -5,6 +5,7 @@
 Read the voter list name and filename on the first row of the apartment list, followed by
 apartment names, roster filenames, and optional alternate names separated by semicolons.
 Read prepared voter tables or normalize a raw AC Excel export in memory.
+Keep source roll numbers and relationship details when present.
 Standardize source rosters in memory and label each output row with the voter list searched.
 Recognize any configured name for the apartment in voter addresses.
 The workbook lists assigned voters, unassigned voters alongside households without a unit
@@ -43,7 +44,7 @@ from openpyxl.styles import Alignment, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 import matching as matcher
-from voter_roll import read_ac_export
+from voter_roll import read_ac_export, text_value
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +56,7 @@ ALGORITHM_VERSION = "named-section-95-v1"
 
 VOTER_OUTPUT_COLUMNS = [
     "serial_number",
+    "roll_number",
     "epic_number",
     "voter_name",
     "relation_type",
@@ -142,6 +144,7 @@ CONNECTION_PRIORITY_HOUSEHOLD_MEMBER = 3
 
 INDIVIDUAL_RELATED_COLUMNS = [
     "serial_number",
+    "roll_number",
     "epic_number",
     "voter_name",
     "relation_type",
@@ -1353,6 +1356,7 @@ def base_output_record(voter: pd.Series, config: ApartmentConfig) -> dict[str, o
         "part": voter["part"],
         "section_raw": voter["section_raw"],
         "serial_number": voter["serial_number"],
+        "roll_number": voter.get("roll_number"),
         "epic_number": voter["epic_number"],
         "voter_name": voter["name"],
         "relation_type": voter["relation_type"],
@@ -1423,6 +1427,12 @@ def summarize_unmapped_households(
     households = []
     for household_id, rows in report_rows.groupby("household_id", sort=False):
         first = rows.iloc[0]
+        # Preserve the roll numbers in the same order as the summary's serial numbers.
+        roll_numbers = rows["roll_number"].tolist() if "roll_number" in rows else []
+        roll_text = [text_value(value) if pd.notna(value) else "" for value in roll_numbers]
+        roll_number = None
+        if any(roll_text):
+            roll_number = roll_numbers[0] if len(roll_numbers) == 1 else ", ".join(roll_text)
         households.append(
             {
                 "household_id": household_id,
@@ -1432,9 +1442,10 @@ def summarize_unmapped_households(
                 "pollingname": first["pollingname"],
                 "voter_count": len(rows),
                 "voter_serial_numbers": ", ".join(rows["serial_number"].astype(str)),
+                "roll_number": roll_number,
             }
         )
-    return pd.DataFrame(households, columns=UNMAPPED_HOUSEHOLD_COLUMNS)
+    return pd.DataFrame(households, columns=[*UNMAPPED_HOUSEHOLD_COLUMNS, "roll_number"])
 
 
 def dominated_voter_links(out: pd.DataFrame) -> dict[tuple[int, str], set[str]]:
@@ -2147,6 +2158,9 @@ def excel_ready(frame: pd.DataFrame) -> pd.DataFrame:
     """Write text columns as text: a column read with mixed numbers and text becomes all text."""
     frame = frame.copy()
     for column in frame.columns:
+        # An unmapped summary can show multiple roll numbers beside numeric individual ones.
+        if column == "roll_number":
+            continue
         if frame[column].dtype == object:
             values = frame[column]
             frame[column] = values.where(values.isna(), values.astype(str))
@@ -2216,6 +2230,8 @@ def write_output_workbook(
     preliminary_only: bool = False,
 ) -> None:
     # Keep the household summary columns and retain the full record for each moved voter.
+    if "roll_number" not in mapped_voters:
+        mapped_voters = mapped_voters.assign(roll_number=None)
     household_summaries = unmapped_households.assign(apartment_status=UNMAPPED_STATUS)
     unassigned = unassigned_voters.assign(
         voter_count=1,
@@ -2277,10 +2293,23 @@ def read_voter_source(path: Path, *, nrows: int | None = None) -> pd.DataFrame:
     else:
         voters = pd.read_csv(path, nrows=nrows)
 
-    required_columns = (set(VOTER_OUTPUT_COLUMNS) - {"voter_name"}) | {"name"}
+    optional = {
+        "roll_number": ("Roll No.", "roll_no"),
+        "relation_type": ("Relation", "relation"),
+        "relation_name": ("Relative's Name",),
+    }
+    required_columns = (set(VOTER_OUTPUT_COLUMNS) - {"voter_name", *optional}) | {"name"}
     missing = sorted(required_columns - set(voters.columns))
     if missing:
         raise ValueError(f"{path.name} is missing required voter columns: {', '.join(missing)}")
+    for column, aliases in optional.items():
+        if column in voters:
+            continue
+        source_column = next((name for name in aliases if name in voters), None)
+        if source_column is not None:
+            voters = voters.rename(columns={source_column: column})
+        elif column != "roll_number":
+            voters[column] = None
     return voters
 
 

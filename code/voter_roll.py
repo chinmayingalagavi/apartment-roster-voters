@@ -1,6 +1,7 @@
 # Normalize raw Assembly Constituency Excel voter rolls for the matcher.
 # Inputs: the first worksheet's header and data rows, with an optional row limit.
 # Prefer supplied part numbers and derive grouping keys when they are missing.
+# Retain roll numbers and relationship details when the source supplies them.
 # AUTHOR: Chinmay and AI
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import pandas as pd
 
 AC_HEADERS = {
     "serial_number": "SI. NO.",
+    "roll_number": "Roll No.",
     "epic_number": "EPIC ID",
     "name": "Name",
     "relation_type": "Relation",
@@ -27,7 +29,7 @@ AC_HEADERS = {
     "pollingaddress": "Address of Polling Station",
 }
 AC_SIGNATURE = ("SI. NO.", "EPIC ID", "No. Name and Reservation Status of Assembly Constituency")
-AC_REQUIRED = ("serial_number", "epic_number", "name", "relation_name", "house_number", "section_raw")
+AC_REQUIRED = ("serial_number", "epic_number", "name", "house_number", "section_raw")
 AC_OUTPUT_COLUMNS = (*AC_HEADERS, "part", "corporation")
 PART_HEADER_KEYS = ("part", "partno", "partnumber")
 STATION_PREFIX = re.compile(r"^\s*(\d+)\s*[-–—.:]\s*\S")
@@ -77,8 +79,6 @@ def read_ac_export(
     if nrows == 0:
         return pd.DataFrame(columns=AC_OUTPUT_COLUMNS)
 
-    roll_number_index = positions.get(header_key("Roll No."))
-
     def records():
         unnumbered_groups = 0
         previous_station = None
@@ -117,7 +117,7 @@ def read_ac_export(
             else:
                 # A negative local key keeps contiguous unnumbered stations separate.
                 station_key = (record["pollingname"], record["pollingaddress"], record["ward"])
-                roll_text = text_value(cell_value(row, roll_number_index)).strip()
+                roll_text = text_value(record["roll_number"]).strip()
                 roll_number = int(roll_text) if roll_text.isdecimal() else None
                 starts_block = (
                     station_key != previous_station or not record["pollingaddress"]

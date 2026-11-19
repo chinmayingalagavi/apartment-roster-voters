@@ -46,10 +46,10 @@ For new rosters, use one row per person with columns called `name` and `unit`. T
 
 You can use an original AC Excel export such as `AC_176_BANGALORE_SOUTH.xlsx` directly. The matcher recognizes its official column headings on the first worksheet. It reads the `Relation` column or the relationship prefix used in older exports. It uses a supplied `Part`, `Part No.` or `Part Number` value first. If that value is missing, it uses the polling-station number. When neither is available, it assigns separate local group IDs using consecutive source addresses and roll-number boundaries.
 
-For a prepared voter file, put these column names on the first row.
+For a prepared voter file, put these column names on the first row. `roll_number`, `relation_type` and `relation_name` are optional. The voter sheets keep their values when supplied.
 
 ```csv
-serial_number,epic_number,name,relation_type,relation_name,house_number,age,gender,section_raw,part,ward,corporation,pincode,pollingname,pollingaddress
+serial_number,roll_number,epic_number,name,relation_type,relation_name,house_number,age,gender,section_raw,part,ward,corporation,pincode,pollingname,pollingaddress
 ```
 
 ## Matching algorithm
