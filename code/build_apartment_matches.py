@@ -14,7 +14,8 @@ flat, and roster rows that no voter row is connected through.
 Relation and household links require a voter directly matched to the same flat.
 Two people linked on the voter roll can corroborate each other's roster matches.
 Rank competing voter records for each roster person by name score and booth support.
-Show match strength in the voter sheets, shade voter rows, and separate flats with dark borders.
+Show match strength and separate flats with dark borders. Shade mapped rows by match
+strength and unmapped rows by flat status.
 Select links through named-apartment section evidence, corroborated related pairs,
 an exact multiword own name and full flat, or a guarded 95% score in a named section.
 Recover uncontested full-word matches at explicitly named buildings and complete flats.
@@ -142,6 +143,12 @@ HOUSEHOLD_BORDER = Side(style="medium", color="FF344054")
 # Statuses reported on the second sheet.
 UNMAPPED_STATUS = "Unmapped"
 UNASSIGNED_STATUS = "Unassigned"
+FLAT_UNRESOLVED = "Flat unresolved"
+ROSTER_LINK_UNRESOLVED = "Roster link unresolved"
+UNMAPPED_FLAT_COLORS = {
+    FLAT_UNRESOLVED: CONFIDENCE_COLORS["Probable"],
+    ROSTER_LINK_UNRESOLVED: CONFIDENCE_COLORS["Strong"],
+}
 
 # Which roster person a row is connected through, in order of preference.
 CONNECTION_PRIORITY_VOTER_NAME = 1
@@ -2173,16 +2180,18 @@ def excel_ready(frame: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
-def shade_households(sheet, confidence: Iterable[str | None], *, include_unscored: bool = False) -> None:
-    """Color scored voter rows and draw a line between flats."""
+def shade_households(
+    sheet, levels: Iterable[str | None], *, colors: dict[str, str], include_unscored: bool = False,
+) -> None:
+    """Color voter rows by the supplied labels and draw a line between flats."""
     fills = {
         level: PatternFill(fill_type="solid", fgColor=color)
-        for level, color in CONFIDENCE_COLORS.items()
+        for level, color in colors.items()
     }
     unit_column = next(cell.column - 1 for cell in sheet[1] if cell.value == "apartment_unit")
-    rows_with_confidence = zip(sheet.iter_rows(min_row=2), confidence, strict=True)
+    rows_with_levels = zip(sheet.iter_rows(min_row=2), levels, strict=True)
     voter_rows = (
-        (row, level) for row, level in rows_with_confidence
+        (row, level) for row, level in rows_with_levels
         if pd.notna(level) or (include_unscored and row[unit_column].value)
     )
     households = groupby(voter_rows, key=lambda item: item[0][unit_column].value)
@@ -2248,7 +2257,7 @@ def write_output_workbook(
     unmapped["voter_count"] = 1
     unmapped["voter_serial_numbers"] = unmapped["serial_number"].astype(str)
     unmapped["flat_status"] = unmapped["apartment_unit"].fillna("").eq("").map(
-        {True: "Flat unresolved", False: "Roster link unresolved"}
+        {True: FLAT_UNRESOLVED, False: ROSTER_LINK_UNRESOLVED}
     )
     sheets = (
         (VOTERS_SHEET, mapped_voters),
@@ -2279,8 +2288,11 @@ def write_output_workbook(
             display.to_excel(writer, sheet_name=sheet_name, index=False)
             sheet = writer.sheets[sheet_name]
             format_sheet(sheet, display)
-            if sheet_name in (VOTERS_SHEET, UNMAPPED_VOTERS_SHEET):
-                shade_households(sheet, frame["_match_confidence"], include_unscored=preliminary_only)
+            if sheet_name == VOTERS_SHEET:
+                shade_households(sheet, frame["_match_confidence"], colors=CONFIDENCE_COLORS,
+                                 include_unscored=preliminary_only)
+            elif sheet_name == UNMAPPED_VOTERS_SHEET:
+                shade_households(sheet, display["flat_status"], colors=UNMAPPED_FLAT_COLORS)
 
 
 def read_voter_source(path: Path, *, nrows: int | None = None) -> pd.DataFrame:
