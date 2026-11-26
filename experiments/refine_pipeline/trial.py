@@ -109,16 +109,14 @@ def write_workbook(captured, resolved, assigned, unmapped, target, list_name):
     connected = {(unit, matcher.connection_name_key(name)) for unit, names in zip(
         resolved["apartment_unit"], resolved["_connection_names"]) for name in names}
     unmatched = matcher.roster_rows_not_matched(source, roster, connected)
-    unmapped_households = matcher.summarize_unmapped_households(
-        unmapped, voters, resolved.loc[resolved["apartment_unit"].ne(""), "_row_id"], config,
-    )
+    unmapped_voters = matcher.unmapped_voter_report(resolved, unmapped, voters, config)
     mapped = resolved.loc[assigned].sort_values(["apartment_unit", "apartment_status", "part", "serial_number"])
     unassigned = resolved[resolved["apartment_status"].eq(matcher.UNASSIGNED_STATUS)]
     target.parent.mkdir(parents=True, exist_ok=True)
     section_columns = [column for column in ("other_hh_matched_section_in_part", "other_named_flats_in_section")
                        if column in mapped]
     with patch.object(matcher, "MAPPED_OUTPUT_COLUMNS", [*matcher.MAPPED_OUTPUT_COLUMNS, *section_columns]):
-        matcher.write_output_workbook(target, mapped, unmatched, unmapped_households, unassigned, searched_voter_list=list_name)
+        matcher.write_output_workbook(target, mapped, unmatched, unmapped_voters, unassigned, searched_voter_list=list_name)
     assert {identity(row) for row in rows(target)} == {identity(row) for row in mapped.to_dict("records")}
 
 

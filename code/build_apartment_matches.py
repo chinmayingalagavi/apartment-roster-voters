@@ -9,8 +9,8 @@ Recognize input column names regardless of capitalization.
 Keep source roll numbers and relationship details when present.
 Standardize source rosters in memory and label each output row with the voter list searched.
 Recognize any configured name for the apartment in voter addresses.
-The workbook lists assigned voters, unassigned voters alongside households without a unit
-link, and roster rows that no voter row is connected through.
+The workbook lists assigned voters, individual voters without a resolved roster link or
+flat, and roster rows that no voter row is connected through.
 Relation and household links require a voter directly matched to the same flat.
 Two people linked on the voter roll can corroborate each other's roster matches.
 Rank competing voter records for each roster person by name score and booth support.
@@ -45,7 +45,7 @@ from openpyxl.styles import Alignment, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 import matching as matcher
-from voter_roll import read_ac_export, text_value
+from voter_roll import read_ac_export
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -110,21 +110,26 @@ MAPPED_OUTPUT_COLUMNS = [
     "apartment_unit_part",
 ]
 
-# Workbook sheets and columns for the household-level address report.
+# Workbook sheets and the shared layout for all unmapped voter rows.
 VOTERS_SHEET = "voters_mapped_tohouse"
-UNMAPPED_HOUSEHOLDS_SHEET = "voters_unmapped"
+UNMAPPED_VOTERS_SHEET = "voters_unmapped"
 ROSTER_NOT_MATCHED_SHEET = "not_found_in_voterlist"
-UNMAPPED_HOUSEHOLD_COLUMNS = [
-    "household_id",
+UNMAPPED_OUTPUT_COLUMNS = list(dict.fromkeys([
+    "voter_name",
     "house_number",
+    "apartment_unit",
+    "flat_status",
+    "strength",
     "part",
-    "section_raw",
-    "pollingname",
+    "roll_number",
+    "serial_number",
+    "epic_number",
+    *VOTER_DETAIL_COLUMNS,
+    *APARTMENT_UNIT_COLUMNS,
+    *MATCH_DETAIL_COLUMNS,
+    "household_id",
     "voter_count",
     "voter_serial_numbers",
-]
-UNMAPPED_OUTPUT_COLUMNS = list(dict.fromkeys([
-    *UNMAPPED_HOUSEHOLD_COLUMNS, *APARTMENT_UNIT_COLUMNS, "strength", *MATCH_DETAIL_COLUMNS, *VOTER_DETAIL_COLUMNS,
 ]))
 MAX_EXCEL_COLUMN_WIDTH = 50
 CONFIDENCE_COLORS = {
@@ -1433,40 +1438,25 @@ def collapse_unresolved_group_records(out: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(collapsed)
 
 
-def summarize_unmapped_households(
+def unmapped_voter_report(
+    output_rows: pd.DataFrame,
     unmapped_rows: pd.DataFrame,
     voters: pd.DataFrame,
-    mapped_row_ids: pd.Series,
     config: ApartmentConfig,
 ) -> pd.DataFrame:
-    """Summarize household groups with an exact apartment name and no linked unit."""
+    """Keep individual voter records for the exact-address households with no linked unit."""
     exact_name = compile_terms_re(config.address_names, allow_joined_words=False)
     named_rows = unmapped_rows["address_norm"].str.contains(exact_name, na=False)
-    mapped_households = voters.loc[voters["_row_id"].isin(mapped_row_ids), "household_id"]
-    report_rows = unmapped_rows[named_rows & ~unmapped_rows["household_id"].isin(mapped_households)]
-
-    households = []
-    for household_id, rows in report_rows.groupby("household_id", sort=False):
-        first = rows.iloc[0]
-        # Preserve the roll numbers in the same order as the summary's serial numbers.
-        roll_numbers = rows["roll_number"].tolist() if "roll_number" in rows else []
-        roll_text = [text_value(value) if pd.notna(value) else "" for value in roll_numbers]
-        roll_number = None
-        if any(roll_text):
-            roll_number = roll_numbers[0] if len(roll_numbers) == 1 else ", ".join(roll_text)
-        households.append(
-            {
-                "household_id": household_id,
-                "house_number": "; ".join(rows["house_number"].astype(str).unique()),
-                "part": first["part"],
-                "section_raw": first["section_raw"],
-                "pollingname": first["pollingname"],
-                "voter_count": len(rows),
-                "voter_serial_numbers": ", ".join(rows["serial_number"].astype(str)),
-                "roll_number": roll_number,
-            }
-        )
-    return pd.DataFrame(households, columns=[*UNMAPPED_HOUSEHOLD_COLUMNS, "roll_number"])
+    unit_linked_ids = output_rows.loc[output_rows["apartment_unit"].ne(""), "_row_id"]
+    linked_households = voters.loc[voters["_row_id"].isin(unit_linked_ids), "household_id"]
+    eligible = unmapped_rows.loc[
+        named_rows & ~unmapped_rows["household_id"].isin(linked_households),
+        ["_row_id", "household_id"],
+    ]
+    # Join by source row ID so repeated serial numbers or EPIC IDs stay distinct.
+    report_columns = [*VOTER_DETAIL_COLUMNS, "apartment", "apartment_status", "voter_link_type", "_row_id"]
+    detailed = output_rows.loc[output_rows["apartment_status"].eq(UNMAPPED_STATUS), report_columns]
+    return detailed.merge(eligible, on="_row_id", validate="one_to_one").drop(columns="_row_id")
 
 
 def dominated_voter_links(out: pd.DataFrame) -> dict[tuple[int, str], set[str]]:
@@ -1706,7 +1696,7 @@ def build_apartment_voter_rows(
     preliminary_only: bool = False,
     on_preliminary: Callable[[pd.DataFrame, pd.DataFrame], None] | None = None,
 ) -> tuple[pd.DataFrame, set[tuple[str, str]], pd.DataFrame]:
-    """Return voter rows, connected (unit, roster name key) pairs, and unmapped household groups."""
+    """Return voter rows, connected (unit, roster name key) pairs, and the unmapped voter report."""
     identity_usable = voters.copy()
     number_only_groups = {
         str(key): group.copy()
@@ -1897,14 +1887,9 @@ def prepare_apartment_output(
         return (
             pd.DataFrame(columns=[*OUTPUT_COLUMNS, "_match_confidence"]),
             connected,
-            pd.DataFrame(columns=UNMAPPED_HOUSEHOLD_COLUMNS),
+            pd.DataFrame(columns=["household_id"]),
         )
-    unmapped_households = summarize_unmapped_households(
-        unmapped_rows,
-        voters,
-        out.loc[out["apartment_unit"].ne(""), "_row_id"],
-        config,
-    )
+    unmapped_voters = unmapped_voter_report(out, unmapped_rows, voters, config)
     connected = {
         (str(unit), connection_name_key(name))
         for unit, names in zip(out["apartment_unit"], out["_connection_names"])
@@ -1916,7 +1901,7 @@ def prepare_apartment_output(
     out = out.sort_values(sort_cols).reset_index(drop=True)
     out["part_name_match"] = out["part_name_match"].astype("Int64")
     out["name_match_pct"] = out["name_match_pct"].astype("Int64")
-    return out[[*OUTPUT_COLUMNS, "_match_confidence"]], connected, unmapped_households
+    return out[[*OUTPUT_COLUMNS, "_match_confidence"]], connected, unmapped_voters
 
 
 def resolve_voter_links(
@@ -2179,7 +2164,7 @@ def excel_ready(frame: pd.DataFrame) -> pd.DataFrame:
     """Write text columns as text: a column read with mixed numbers and text becomes all text."""
     frame = frame.copy()
     for column in frame.columns:
-        # An unmapped summary can show multiple roll numbers beside numeric individual ones.
+        # Preserve the source type of each roll number.
         if column == "roll_number":
             continue
         if frame[column].dtype == object:
@@ -2222,13 +2207,13 @@ def format_sheet(sheet, frame: pd.DataFrame) -> None:
         for cell in row:
             if cell.data_type == "f":
                 cell.data_type = "s"
-    sheet.freeze_panes = "A2"
+    sheet.freeze_panes = "B2" if sheet.title == UNMAPPED_VOTERS_SHEET else "A2"
     sheet.auto_filter.ref = sheet.dimensions
     for position, column in enumerate(frame.columns, start=1):
         letter = get_column_letter(position)
         lengths = [len(str(column)), *(len(str(value)) for value in frame[column].dropna())]
         width = min(max(lengths) + 2, MAX_EXCEL_COLUMN_WIDTH)
-        if sheet.title == UNMAPPED_HOUSEHOLDS_SHEET:
+        if sheet.title == UNMAPPED_VOTERS_SHEET:
             width = max(width, len(column) + 5)
             # Keep long addresses and polling-station names readable within the width cap.
             for cell in sheet[letter][1:]:
@@ -2244,37 +2229,37 @@ def write_output_workbook(
     destination: Path,
     mapped_voters: pd.DataFrame,
     roster_not_matched: pd.DataFrame,
-    unmapped_households: pd.DataFrame,
+    unmapped_voters: pd.DataFrame,
     unassigned_voters: pd.DataFrame,
     *,
     searched_voter_list: str = "",
     preliminary_only: bool = False,
 ) -> None:
-    # Keep the household summary columns and retain the full record for each moved voter.
+    # Use the same schema whether the flat is missing or its roster link is unresolved.
     if "roll_number" not in mapped_voters:
         mapped_voters = mapped_voters.assign(roll_number=None)
-    household_summaries = unmapped_households.assign(apartment_status=UNMAPPED_STATUS)
-    unassigned = unassigned_voters.assign(
-        voter_count=1,
-        voter_serial_numbers=unassigned_voters["serial_number"].astype(str),
-    )
-    rows = [frame for frame in (household_summaries, unassigned) if not frame.empty]
+    rows = [frame for frame in (unmapped_voters, unassigned_voters) if not frame.empty]
     columns = [*UNMAPPED_OUTPUT_COLUMNS, "_match_confidence"]
     unmapped = (
         pd.concat(rows, ignore_index=True).reindex(columns=columns)
         if rows
         else pd.DataFrame(columns=columns)
     )
+    unmapped["voter_count"] = 1
+    unmapped["voter_serial_numbers"] = unmapped["serial_number"].astype(str)
+    unmapped["flat_status"] = unmapped["apartment_unit"].fillna("").eq("").map(
+        {True: "Flat unresolved", False: "Roster link unresolved"}
+    )
     sheets = (
         (VOTERS_SHEET, mapped_voters),
-        (UNMAPPED_HOUSEHOLDS_SHEET, unmapped),
+        (UNMAPPED_VOTERS_SHEET, unmapped),
         (ROSTER_NOT_MATCHED_SHEET, roster_not_matched),
     )
     with pd.ExcelWriter(destination, engine="openpyxl") as writer:
         for sheet_name, frame in sheets:
             frame = excel_ready(frame)
             display = frame
-            if sheet_name in (VOTERS_SHEET, UNMAPPED_HOUSEHOLDS_SHEET):
+            if sheet_name in (VOTERS_SHEET, UNMAPPED_VOTERS_SHEET):
                 strength = frame["_match_confidence"]
                 if not preliminary_only:
                     strength = strength.replace({"Probable": "Medium"})
@@ -2294,7 +2279,7 @@ def write_output_workbook(
             display.to_excel(writer, sheet_name=sheet_name, index=False)
             sheet = writer.sheets[sheet_name]
             format_sheet(sheet, display)
-            if sheet_name in (VOTERS_SHEET, UNMAPPED_HOUSEHOLDS_SHEET):
+            if sheet_name in (VOTERS_SHEET, UNMAPPED_VOTERS_SHEET):
                 shade_households(sheet, frame["_match_confidence"], include_unscored=preliminary_only)
 
 
@@ -2362,13 +2347,13 @@ def run_one(
     voters = build_address_fields(voters, roster_rows, config)
     voters = matcher.assign_households(voters)
 
-    def export(destination, output, connected_people, household_summaries, *, preliminary):
+    def export(destination, output, connected_people, unmapped, *, preliminary):
         not_matched = roster_rows_not_matched(source_rows, roster_rows, connected_people)
         is_unassigned = output["apartment_status"].eq(UNASSIGNED_STATUS)
         is_mapped = output["apartment_unit"].ne("") & ~is_unassigned
         destination.parent.mkdir(parents=True, exist_ok=True)
         write_output_workbook(
-            destination, output.loc[is_mapped], not_matched, household_summaries, output.loc[is_unassigned],
+            destination, output.loc[is_mapped], not_matched, unmapped, output.loc[is_unassigned],
             searched_voter_list=searched_voter_list, preliminary_only=preliminary,
         )
         return not_matched
@@ -2380,10 +2365,10 @@ def run_one(
             preliminary = prepare_apartment_output(voters, config, initial, unmapped, preliminary_only=True)
             export(preliminary_output_xlsx, *preliminary, preliminary=True)
 
-    out, connected, unmapped_households = build_apartment_voter_rows(
+    out, connected, unmapped_voters = build_apartment_voter_rows(
         voters, roster_rows, roster, config, preliminary_only=preliminary_only, on_preliminary=on_preliminary,
     )
-    not_matched = export(output_xlsx, out, connected, unmapped_households, preliminary=preliminary_only)
+    not_matched = export(output_xlsx, out, connected, unmapped_voters, preliminary=preliminary_only)
     print(f"{config.key}: rows: {len(out)}")
     if not out.empty:
         print(out["apartment_status"].value_counts().to_string())
@@ -2396,9 +2381,10 @@ def run_one(
             f"{int(out['voter_link_type'].str.contains('explicit_apartment_address', regex=False).sum())}"
         )
     print(f"roster_rows_not_matched: {len(not_matched)}")
-    print(f"unmapped_households: {len(unmapped_households)}")
+    print(f"unmapped_households: {unmapped_voters['household_id'].nunique()}")
+    print(f"unmapped_voter_rows: {len(unmapped_voters)}")
     print(f"output_xlsx: {output_xlsx}")
-    return apartment_run_summary(config, roster_rows, out, not_matched, unmapped_households, output_xlsx)
+    return apartment_run_summary(config, roster_rows, out, not_matched, unmapped_voters, output_xlsx)
 
 
 def household_count(rows: pd.DataFrame) -> int:
@@ -2438,7 +2424,7 @@ def apartment_run_summary(
     roster_rows: pd.DataFrame,
     output_rows: pd.DataFrame,
     roster_not_matched: pd.DataFrame,
-    unmapped_households: pd.DataFrame,
+    unmapped_voters: pd.DataFrame,
     output_xlsx: Path,
 ) -> dict[str, object]:
     identity_rows = output_rows[
@@ -2456,7 +2442,8 @@ def apartment_run_summary(
         "roster_rows": int(len(roster_rows)),
         "roster_households": int(roster_rows["unit"].nunique()),
         "roster_rows_not_matched": int(len(roster_not_matched)),
-        "unmapped_households": len(unmapped_households),
+        "unmapped_households": int(unmapped_voters["household_id"].nunique()),
+        "unmapped_voter_rows": int(len(unmapped_voters)),
         "mapped_voter_rows": int(
             (output_rows["apartment_unit"].ne("") & output_rows["apartment_status"].ne(UNASSIGNED_STATUS)).sum()
         ),

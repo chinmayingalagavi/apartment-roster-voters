@@ -94,9 +94,7 @@ def make_workbook(config, voter_file, list_name):
                  for name in names}
     source_rows = matcher.read_roster_source(config)
     not_matched = matcher.roster_rows_not_matched(source_rows, roster_rows, connected)
-    unmapped = matcher.summarize_unmapped_households(
-        unmapped_rows, voters, resolved.loc[resolved["apartment_unit"].ne(""), "_row_id"], config
-    )
+    unmapped = matcher.unmapped_voter_report(resolved, unmapped_rows, voters, config)
     mapped_rows = mapped_rows.sort_values(["apartment_unit", "apartment_status", "part", "serial_number"])
     output = DESTINATION / f"{config.key}_voters.xlsx"
     display_columns = [*matcher.MAPPED_OUTPUT_COLUMNS, "other_hh_matched_section_in_part"]

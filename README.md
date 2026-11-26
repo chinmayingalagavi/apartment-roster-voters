@@ -151,7 +151,7 @@ Eligibility, support counts and strength qualifications use the frozen prelimina
 ### 8. Write the output
 
 - `voters_mapped_tohouse` contains surviving voters with resolved roster-flat connections, sorted by flat, roster status, part and serial number. Strength identifies name-linked and household-linked rows. Strong rows are light green and Medium rows light blue, with a dark border between flats.
-- `voters_unmapped` contains Unassigned voters whose addresses identify a flat but whose roster connection or status is unresolved, plus summaries of explicitly named apartment households without a resolved flat.
+- `voters_unmapped` shows individual voter records with their original roll addresses and details. The `flat_status` column reads **Roster link unresolved** when a flat is proposed and **Flat unresolved** when the flat fields are blank.
 - `not_found_in_voterlist` contains source roster rows without a surviving connection in the resolved output.
 
 On the first sheet, `other_hh_matched_booth` counts all other preliminary candidate flats at the booth. `other_hh_matched_section_in_part` counts all other preliminary candidate flats in the same part and section. `other_named_flats_in_section` counts only other flats with explicit apartment-name addresses and unique flat parses in that same part and section. Each counts distinct flats and excludes the row's own flat.
