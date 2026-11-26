@@ -5,6 +5,7 @@
 Read the voter list name and filename on the first row of the apartment list, followed by
 apartment names, roster filenames, and optional alternate names separated by semicolons.
 Read prepared voter tables or normalize a raw AC Excel export in memory.
+Recognize input column names regardless of capitalization.
 Keep source roll numbers and relationship details when present.
 Standardize source rosters in memory and label each output row with the voter list searched.
 Recognize any configured name for the apartment in voter addresses.
@@ -31,7 +32,7 @@ import json
 import re
 import unicodedata
 from copy import copy
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import combinations, groupby
@@ -192,9 +193,9 @@ STANDARD_ROSTER_COLUMNS = [
 
 # Source workbook columns used by the original roster converters.
 EXCEL_ROSTER_COLUMNS = {
-    "concorde": {"House #": "unit_part", "Block": "block", "Name": "name", "Residency": "status"},
-    "purnima": {"Flat #": "unit", "Name": "name", "Status": "status"},
-    "silicon_oasis": {"Flat No.": "unit", "Name": "name", "Status": "status"},
+    "concorde": {"house #": "unit_part", "block": "block", "name": "name", "residency": "status"},
+    "purnima": {"flat #": "unit", "name": "name", "status": "status"},
+    "silicon_oasis": {"flat no.": "unit", "name": "name", "status": "status"},
 }
 
 KNOWN_APARTMENTS: dict[str, tuple[str, tuple[str, ...]]] = {
@@ -307,6 +308,21 @@ def apartment_key(apartment_name: str) -> str:
     return ROSTER_LABEL_KEYS.get(slug, slug)
 
 
+def input_column_key(column: object) -> str:
+    return column.strip().casefold() if isinstance(column, str) else ""
+
+
+def canonical_input_columns(columns: Iterable, expected: Iterable[str], path: Path) -> list:
+    """Recognize known input headers without changing extra column labels or cell values."""
+    names = {input_column_key(column): column for column in expected}
+    canonical = [names.get(input_column_key(column), column) for column in columns]
+    duplicates = sorted(column for column, count in Counter(canonical).items()
+                        if count > 1 and column in names.values())
+    if duplicates:
+        raise ValueError(f"{path.name} has duplicate input columns: {', '.join(duplicates)}")
+    return canonical
+
+
 def _read_apartment_list(path: Path) -> tuple[list[tuple[int, dict[str, str]]], Path | None, str]:
     """Read the voter list name and path, followed by apartment rows."""
     if not path.is_file():
@@ -323,11 +339,14 @@ def _read_apartment_list(path: Path) -> tuple[list[tuple[int, dict[str, str]]], 
         raise SystemExit(f"Cannot read apartment list {path}: {error}") from error
 
     first = rows[0] if rows else []
-    headed_layout = len(first) > 1 and any(column in first for column in APARTMENT_CONFIG_REQUIRED_COLUMNS)
+    headed_layout = len(first) > 1 and any(input_column_key(cell) in APARTMENT_CONFIG_REQUIRED_COLUMNS for cell in first)
     voter_file = None
     searched_voter_list = ""
     if headed_layout:
-        columns = first
+        try:
+            columns = canonical_input_columns(first, APARTMENT_CONFIG_COLUMNS, path)
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
         missing = [column for column in APARTMENT_CONFIG_REQUIRED_COLUMNS if column not in columns]
         if missing:
             raise SystemExit(f"{path} is missing required columns: {', '.join(missing)}")
@@ -808,10 +827,11 @@ def read_roster_source(config: ApartmentConfig) -> pd.DataFrame:
     path = config.roster_path
     if path.suffix.lower() in {".xlsx", ".xlsm"}:
         source = pd.read_excel(path, dtype=str)
+        columns = EXCEL_ROSTER_COLUMNS.get(config.key, {})
+        source.columns = canonical_input_columns(source.columns, (*STANDARD_ROSTER_COLUMNS, *columns), path)
         if "name" in source and {"unit", "unit_part"}.intersection(source.columns):
             return source.fillna("")
 
-        columns = EXCEL_ROSTER_COLUMNS.get(config.key, {})
         if not columns or not set(columns).issubset(source.columns):
             expected = ", ".join(columns) if columns else "name and either unit or unit_part"
             raise ValueError(f"{path} is missing expected roster columns: {expected}")
@@ -835,6 +855,7 @@ def read_roster_source(config: ApartmentConfig) -> pd.DataFrame:
                 raise
             roster = pd.read_csv(path, dtype=str, keep_default_na=False, encoding="cp1252")
 
+        roster.columns = canonical_input_columns(roster.columns, STANDARD_ROSTER_COLUMNS, path)
         if "name" not in roster or not {"unit", "unit_part"}.intersection(roster.columns):
             raise ValueError(f"{path} is missing expected roster columns: name and either unit or unit_part")
 
@@ -2279,26 +2300,31 @@ def write_output_workbook(
 
 def read_voter_source(path: Path, *, nrows: int | None = None) -> pd.DataFrame:
     """Read a prepared table or raw AC export from a voter-list file."""
+    optional = {
+        "roll_number": ("roll no.", "roll_no"),
+        "relation_type": ("relation",),
+        "relation_name": ("relative's name",),
+    }
+    required_columns = (set(VOTER_OUTPUT_COLUMNS) - {"voter_name", *optional}) | {"name"}
+    expected = (*required_columns, *optional, *(alias for aliases in optional.values() for alias in aliases))
     if path.suffix.lower() == ".xlsx":
         with pd.ExcelFile(path, engine="openpyxl") as workbook:
             rows = workbook.book.worksheets[0].iter_rows(values_only=True)
             try:
-                voters = read_ac_export(next(rows, ()), rows, path.name, nrows=nrows)
+                header = next(rows, ())
+                voters = read_ac_export(header, rows, path.name, nrows=nrows)
             finally:
                 close_rows = getattr(rows, "close", None)
                 if close_rows is not None:
                     close_rows()
             if voters is None:
-                voters = workbook.parse(nrows=nrows, dtype={"epic_number": str})
+                # Use the source spelling to preserve text identifiers before renaming the header.
+                epic_dtypes = {column: str for column in header if input_column_key(column) == "epic_number"}
+                voters = workbook.parse(nrows=nrows, dtype=epic_dtypes)
     else:
         voters = pd.read_csv(path, nrows=nrows)
 
-    optional = {
-        "roll_number": ("Roll No.", "roll_no"),
-        "relation_type": ("Relation", "relation"),
-        "relation_name": ("Relative's Name",),
-    }
-    required_columns = (set(VOTER_OUTPUT_COLUMNS) - {"voter_name", *optional}) | {"name"}
+    voters.columns = canonical_input_columns(voters.columns, expected, path)
     missing = sorted(required_columns - set(voters.columns))
     if missing:
         raise ValueError(f"{path.name} is missing required voter columns: {', '.join(missing)}")
